@@ -664,16 +664,14 @@ function exportCohortHTML(state, groupId) {
       const dt=slotDate(week1Start,w.n,di);
       rows+=`<td colspan="${slots.length}" class="day-header">${d}<br><span class="date">${fmt(dt)}</span></td>`;
     });
-    rows+="</tr>
-<tr>";
+    rows+="</tr><tr>";
     rows+=`<td class="slot-label">Time</td>`;
     DAYS.forEach((_,di)=>{
       slots.forEach(s=>{
         rows+=`<td class="slot-time">${s.short}<br><span class="date">${s.label}</span></td>`;
       });
     });
-    rows+="</tr>
-<tr>";
+    rows+="</tr><tr>";
     rows+=`<td class="slot-label">Sessions</td>`;
     DAYS.forEach((_,di)=>{
       slots.forEach(s=>{
@@ -692,8 +690,7 @@ function exportCohortHTML(state, groupId) {
         </td>`;
       });
     });
-    rows+="</tr>
-";
+    rows+="</tr>";
   });
 
   const html=`<!DOCTYPE html>
@@ -1138,11 +1135,13 @@ function CSVImportModal({state,setState,toast,onClose}) {
   });
   const [parseResult,setParseResult]=useState(null);
 
-  const TEMPLATE_CSV=`Course Name,Course Code,Instructor,Student Group,Category,Credits
-Intro to Python,CS101,Dr. Alice Chen,CS-1A,Core,3
-Data Structures,CS201,Prof. Ben Okafor,CS-2A,Core,3
-Machine Learning,CS401,Prof. James Wright,Year 1,Elective,4
-Physics Lab,PH101,Dr. Sara Lim,CS-1B,Lab,2`;
+  const TEMPLATE_CSV=[
+    "Course Name,Course Code,Instructor,Student Group,Category,Credits",
+    "Intro to Python,CS101,Dr. Alice Chen,CS-1A,Core,3",
+    "Data Structures,CS201,Prof. Ben Okafor,CS-2A,Core,3",
+    "Machine Learning,CS401,Prof. James Wright,Year 1,Elective,4",
+    "Physics Lab,PH101,Dr. Sara Lim,CS-1B,Lab,2"
+  ].join("\n");
 
   function downloadTemplate() {
     const blob=new Blob([TEMPLATE_CSV],{type:"text/csv"});
@@ -1157,8 +1156,8 @@ Physics Lab,PH101,Dr. Sara Lim,CS-1B,Lab,2`;
     const result=[];let cur="",inQ=false;
     for(let i=0;i<line.length;i++){
       const ch=line[i];
-      if(ch==="\"&&inQ&&line[i+1]==="\""){cur+="\"";i++;continue;}
-      if(ch==="\""){inQ=!inQ;continue;}
+      const QUOTE=String.fromCharCode(34);if(ch===QUOTE&&inQ&&line[i+1]===QUOTE){cur+=QUOTE;i++;continue;}
+      const QUOTE2=String.fromCharCode(34);if(ch===QUOTE2){inQ=!inQ;continue;}
       if(ch===","&&!inQ){result.push(cur.trim());cur="";continue;}
       cur+=ch;
     }
