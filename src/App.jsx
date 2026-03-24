@@ -209,7 +209,7 @@ const GLOBAL_CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
-html{font-size:13px;scroll-behavior:smooth;}
+html{font-size:15px;scroll-behavior:smooth;}
 body{background:#080a0e;color:#e4e8f0;font-family:'Outfit',sans-serif;overflow-x:hidden;}
 :root{
   --bg:     #080a0e;
@@ -235,7 +235,7 @@ body{background:#080a0e;color:#e4e8f0;font-family:'Outfit',sans-serif;overflow-x
 }
 input,select,textarea{
   background:var(--bg3);color:var(--text);border:1px solid var(--border2);
-  border-radius:var(--r);padding:7px 10px;font-family:inherit;font-size:12px;
+  border-radius:var(--r);padding:8px 11px;font-family:inherit;font-size:13px;
   outline:none;transition:border-color 0.15s;width:100%;
 }
 input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:var(--glow);}
@@ -252,6 +252,8 @@ button{font-family:inherit;cursor:pointer;border:none;outline:none;transition:al
 @keyframes spin{to{transform:rotate(360deg)}}
 .fade-in{animation:fadeIn 0.2s ease}
 .slide-in{animation:slideIn 0.2s ease}
+[data-scroll]{overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;}
+.scroll-area{overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;min-height:0;}
 `;
 
 // ═══════════════════════════════════════════════════════════════════
@@ -627,6 +629,226 @@ function ApptChip({appt,courses,instructors,rooms,onClick,conflicts=[]}) {
   );
 }
 
+
+// ═══════════════════════════════════════════════════════════════════
+//  COHORT TIMETABLE EXPORT
+// ═══════════════════════════════════════════════════════════════════
+function exportCohortHTML(state, groupId) {
+  const {appointments,courses,instructors,rooms,groups,week1Start,slots,settings}=state;
+  const group=groups.find(g=>g.id===groupId);
+  if(!group) return;
+
+  const appts=Object.values(appointments).filter(a=>(a.groupIds||[]).includes(groupId));
+
+  // Build week→day→slot map
+  const byWeek={};
+  appts.forEach(a=>{
+    if(!byWeek[a.weekNum]) byWeek[a.weekNum]={};
+    const k=`${a.dayIdx}_${a.timeId}`;
+    if(!byWeek[a.weekNum][k]) byWeek[a.weekNum][k]=[];
+    byWeek[a.weekNum][k].push(a);
+  });
+
+  const weeks=WEEKS.filter(w=>w.n>0);
+  const PALETTE_MAP=Object.fromEntries(PALETTE.map(p=>[p.id,p]));
+
+  let rows="";
+  weeks.forEach(w=>{
+    const ws=getWeekStart(week1Start,w.n);
+    let hasContent=Object.keys(byWeek[w.n]||{}).length>0;
+    if(!hasContent) return;
+    rows+=`<tr class="week-header"><td colspan="${1+DAYS.length*slots.length}">${w.label} &mdash; ${fmt(ws)} &ndash; ${fmt(addDays(ws,4))}</td></tr>
+<tr>`;
+    rows+=`<td class="slot-label"></td>`;
+    DAYS.forEach((d,di)=>{
+      const dt=slotDate(week1Start,w.n,di);
+      rows+=`<td colspan="${slots.length}" class="day-header">${d}<br><span class="date">${fmt(dt)}</span></td>`;
+    });
+    rows+="</tr>
+<tr>";
+    rows+=`<td class="slot-label">Time</td>`;
+    DAYS.forEach((_,di)=>{
+      slots.forEach(s=>{
+        rows+=`<td class="slot-time">${s.short}<br><span class="date">${s.label}</span></td>`;
+      });
+    });
+    rows+="</tr>
+<tr>";
+    rows+=`<td class="slot-label">Sessions</td>`;
+    DAYS.forEach((_,di)=>{
+      slots.forEach(s=>{
+        const key=`${di}_${s.id}`;
+        const cells=(byWeek[w.n]||{})[key]||[];
+        if(cells.length===0){rows+=`<td class="empty"></td>`;return;}
+        const cell=cells[0];
+        const pal=PALETTE_MAP[courses.find(x=>x.id===cell.courseId)?.colorId]||PALETTE[0];
+        const instr=instructors.find(x=>x.id===cell.instructorId);
+        const room=rooms.find(x=>x.id===cell.roomId);
+        rows+=`<td class="session" style="background:${pal.bg};border-color:${pal.border}">
+          <div class="code" style="color:${pal.accent}">${cell.courseCode||""}</div>
+          <div class="name">${cell.courseName||""}</div>
+          ${instr?`<div class="meta">${instr.name}</div>`:""}
+          ${room?`<div class="meta">${room.name}</div>`:""}
+        </td>`;
+      });
+    });
+    rows+="</tr>
+";
+  });
+
+  const html=`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>${group.name} — Timetable — ${settings.semester}</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:'Outfit',sans-serif;background:#f8fafc;color:#1e293b;padding:24px;font-size:14px;}
+  h1{font-size:22px;font-weight:700;margin-bottom:4px;}
+  .subtitle{color:#64748b;font-size:13px;margin-bottom:24px;}
+  table{width:100%;border-collapse:separate;border-spacing:3px;margin-bottom:32px;}
+  td,th{padding:6px 8px;border-radius:6px;vertical-align:top;}
+  .week-header td{background:#1e293b;color:#f1f5f9;font-weight:600;font-size:12px;
+    letter-spacing:0.06em;padding:8px 10px;border-radius:6px;}
+  .day-header{background:#e2e8f0;font-weight:600;font-size:12px;text-align:center;color:#334155;}
+  .slot-label{color:#94a3b8;font-size:11px;width:60px;}
+  .slot-time{background:#f1f5f9;font-size:10px;color:#64748b;text-align:center;
+    font-family:'JetBrains Mono',monospace;}
+  .date{font-size:9px;color:#94a3b8;font-family:'JetBrains Mono',monospace;}
+  .session{border:1px solid;border-radius:6px;min-width:110px;}
+  .code{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;margin-bottom:3px;}
+  .name{font-size:11px;font-weight:500;line-height:1.3;}
+  .meta{font-size:10px;color:#64748b;margin-top:2px;}
+  .empty{background:#f8fafc;}
+  @media print{body{padding:8px;}h1{font-size:16px;}}
+  .print-btn{position:fixed;top:16px;right:16px;background:#1e293b;color:#f1f5f9;
+    border:none;padding:8px 16px;border-radius:8px;cursor:pointer;font-family:inherit;
+    font-size:13px;font-weight:500;}
+  .print-btn:hover{background:#334155;}
+  @media print{.print-btn{display:none;}}
+</style>
+</head>
+<body>
+<button class="print-btn" onclick="window.print()">Print / Save PDF</button>
+<h1>${group.name} — Timetable</h1>
+<div class="subtitle">${settings.institution} &middot; ${settings.semester} &middot; ${appts.length} sessions scheduled</div>
+<table>${rows}</table>
+</body></html>`;
+
+  const blob=new Blob([html],{type:"text/html"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download=`${group.name.replace(/\s+/g,"-")}-timetable.html`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function exportCohortCSV(state, groupId) {
+  const {appointments,courses,instructors,rooms,groups,slots}=state;
+  const group=groups.find(g=>g.id===groupId);
+  if(!group) return;
+  const appts=Object.values(appointments)
+    .filter(a=>(a.groupIds||[]).includes(groupId))
+    .sort((a,b)=>a.weekNum-b.weekNum||a.dayIdx-b.dayIdx);
+  const rows=[["Week","Day","Slot","Time","Course Code","Course Name","Instructor","Room","All Groups"]];
+  appts.forEach(a=>{
+    const instr=instructors.find(x=>x.id===a.instructorId)?.name||"";
+    const room=rooms.find(x=>x.id===a.roomId)?.name||"";
+    const grps=(a.groupIds||[]).map(g=>groups.find(x=>x.id===g)?.name).filter(Boolean).join("|");
+    const slotLabel=slots.find(s=>s.id===a.timeId)?.label||a.timeId;
+    rows.push([WEEKS.find(w=>w.n===a.weekNum)?.label||`W${a.weekNum}`,
+      DAYS_FULL[a.dayIdx],a.timeId.toUpperCase(),slotLabel,
+      a.courseCode||"",a.courseName||"",instr,room,grps]);
+  });
+  const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
+  const blob=new Blob([csv],{type:"text/csv"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download=`${group.name.replace(/\s+/g,"-")}-timetable.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+
+// ── Export dropdown component ──────────────────────────────────────
+function ExportDropdown({state,filterGroup}) {
+  const [open,setOpen]=useState(false);
+  const ref=useRef();
+  useEffect(()=>{
+    const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};
+    document.addEventListener("mousedown",h);
+    return()=>document.removeEventListener("mousedown",h);
+  },[]);
+  const groups=state.groups;
+  const targetGroup=filterGroup||null;
+  const label=targetGroup?groups.find(g=>g.id===targetGroup)?.name:"Select a group first";
+
+  return (
+    <div ref={ref} style={{position:"relative"}}>
+      <Btn variant="outline" onClick={()=>setOpen(v=>!v)}>
+        ↓ Export {open?"▲":"▼"}
+      </Btn>
+      {open&&(
+        <div style={{position:"absolute",top:"100%",right:0,marginTop:4,zIndex:50,
+          background:"var(--bg3)",border:"1px solid var(--border2)",borderRadius:"var(--r2)",
+          minWidth:220,boxShadow:"var(--shadow)",overflow:"hidden"}}>
+          <div style={{padding:"8px 12px",borderBottom:"1px solid var(--border)",
+            fontSize:10,color:"var(--muted)",fontWeight:600,textTransform:"uppercase",letterSpacing:"0.08em"}}>
+            Export Cohort Timetable
+          </div>
+          {!targetGroup&&(
+            <div style={{padding:"10px 12px",fontSize:11,color:"var(--muted)"}}>
+              Use the group filter to select a cohort first
+            </div>
+          )}
+          {targetGroup&&(
+            <>
+              <div onClick={()=>{exportCohortHTML(state,targetGroup);setOpen(false);}}
+                style={{padding:"10px 14px",cursor:"pointer",fontSize:12,
+                  borderBottom:"1px solid var(--border)",display:"flex",alignItems:"center",gap:8}}
+                onMouseEnter={e=>e.currentTarget.style.background="var(--bg4)"}
+                onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                <span style={{fontSize:14}}>🌐</span>
+                <div>
+                  <div style={{fontWeight:500}}>Export as HTML</div>
+                  <div style={{fontSize:10,color:"var(--muted)"}}>Full printable timetable · open in browser</div>
+                </div>
+              </div>
+              <div onClick={()=>{exportCohortCSV(state,targetGroup);setOpen(false);}}
+                style={{padding:"10px 14px",cursor:"pointer",fontSize:12,
+                  display:"flex",alignItems:"center",gap:8}}
+                onMouseEnter={e=>e.currentTarget.style.background="var(--bg4)"}
+                onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                <span style={{fontSize:14}}>📊</span>
+                <div>
+                  <div style={{fontWeight:500}}>Export as CSV</div>
+                  <div style={{fontSize:10,color:"var(--muted)"}}>All sessions · open in Excel or Sheets</div>
+                </div>
+              </div>
+            </>
+          )}
+          {/* Export all groups */}
+          <div style={{borderTop:"1px solid var(--border)",padding:"6px 8px",display:"flex",flexWrap:"wrap",gap:4}}>
+            {groups.map(g=>(
+              <button key={g.id}
+                onClick={()=>{exportCohortHTML(state,g.id);setOpen(false);}}
+                style={{fontSize:10,padding:"3px 8px",borderRadius:99,cursor:"pointer",
+                  background:"var(--bg4)",border:"1px solid var(--border2)",
+                  color:"var(--muted)",fontFamily:"inherit"}}
+                onMouseEnter={e=>e.currentTarget.style.color="var(--accent)"}
+                onMouseLeave={e=>e.currentTarget.style.color="var(--muted)"}>
+                {g.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  SCHEDULE TAB
 // ═══════════════════════════════════════════════════════════════════
@@ -694,10 +916,13 @@ function ScheduleTab({state,onApptClick,onCellClick,conflicts}) {
           <option value="">All groups</option>
           {state.groups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
         </select>
+
+        {/* Cohort export */}
+        <ExportDropdown state={state} filterGroup={filterGroup}/>
       </div>
 
       {/* Grid */}
-      <div style={{flex:1,overflow:"auto",padding:12}}>
+      <div style={{flex:1,overflowY:"auto",overflowX:"auto",padding:12,minHeight:0,WebkitOverflowScrolling:"touch"}}>
         <table style={{width:"100%",borderCollapse:"separate",borderSpacing:3}}>
           <thead>
             <tr>
@@ -900,6 +1125,289 @@ function DashboardTab({state,conflicts}) {
   );
 }
 
+
+// ═══════════════════════════════════════════════════════════════════
+//  CSV IMPORT MODAL  (courses + instructors + groups)
+// ═══════════════════════════════════════════════════════════════════
+function CSVImportModal({state,setState,toast,onClose}) {
+  const [step,setStep]=useState("upload"); // upload | preview | done
+  const [preview,setPreview]=useState(null); // {rows,headers,parsed}
+  const [error,setError]=useState("");
+  const [mapping,setMapping]=useState({
+    courseName:"",courseCode:"",instructor:"",group:"",category:"",credits:""
+  });
+  const [parseResult,setParseResult]=useState(null);
+
+  const TEMPLATE_CSV=`Course Name,Course Code,Instructor,Student Group,Category,Credits
+Intro to Python,CS101,Dr. Alice Chen,CS-1A,Core,3
+Data Structures,CS201,Prof. Ben Okafor,CS-2A,Core,3
+Machine Learning,CS401,Prof. James Wright,Year 1,Elective,4
+Physics Lab,PH101,Dr. Sara Lim,CS-1B,Lab,2`;
+
+  function downloadTemplate() {
+    const blob=new Blob([TEMPLATE_CSV],{type:"text/csv"});
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download="kronos-import-template.csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  function parseCSVLine(line) {
+    const result=[];let cur="",inQ=false;
+    for(let i=0;i<line.length;i++){
+      const ch=line[i];
+      if(ch==="\"&&inQ&&line[i+1]==="\""){cur+="\"";i++;continue;}
+      if(ch==="\""){inQ=!inQ;continue;}
+      if(ch===","&&!inQ){result.push(cur.trim());cur="";continue;}
+      cur+=ch;
+    }
+    result.push(cur.trim());
+    return result;
+  }
+
+  function handleFile(file) {
+    setError("");
+    const reader=new FileReader();
+    reader.onload=e=>{
+      try {
+        const text=e.target.result;
+        const lines=text.split(/\r?\n/).filter(l=>l.trim());
+        if(lines.length<2){setError("File must have a header row and at least one data row");return;}
+        const headers=parseCSVLine(lines[0]);
+        const rows=lines.slice(1).map(l=>parseCSVLine(l));
+        // Auto-detect column mapping
+        const detect=(hints)=>headers.findIndex(h=>hints.some(hint=>h.toLowerCase().includes(hint)))||"";
+        const autoMap={
+          courseName: headers[detect(["course name","subject","module","name"])]||headers[0]||"",
+          courseCode: headers[detect(["code","course code","subject code"])]||headers[1]||"",
+          instructor: headers[detect(["instructor","teacher","lecturer","staff"])]||"",
+          group:      headers[detect(["group","cohort","class","student"])]||"",
+          category:   headers[detect(["category","type","kind"])]||"",
+          credits:    headers[detect(["credit","credits","units","hours"])]||"",
+        };
+        setMapping(autoMap);
+        setPreview({headers,rows});
+        setStep("preview");
+      } catch(err) {
+        setError("Could not parse file: "+err.message);
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  function handleImport() {
+    if(!preview) return;
+    const {headers,rows}=preview;
+    const get=(row,col)=>col?row[headers.indexOf(col)]||"":"";
+    
+    const newCourses=[...state.courses];
+    const newInstructors=[...state.instructors];
+    const newGroups=[...state.groups];
+    let addedCourses=0,addedInstructors=0,addedGroups=0;
+
+    const COLORS=["sky","emerald","rose","violet","amber","orange","lime","pink","cyan","slate"];
+    let colorIdx=newCourses.length%COLORS.length;
+
+    rows.forEach(row=>{
+      if(row.every(r=>!r)) return; // skip empty rows
+      const courseName=get(row,mapping.courseName).trim();
+      const courseCode=get(row,mapping.courseCode).trim();
+      const instructorName=get(row,mapping.instructor).trim();
+      const groupName=get(row,mapping.group).trim();
+      const category=get(row,mapping.category).trim()||"Core";
+      const credits=parseInt(get(row,mapping.credits))||3;
+      if(!courseName) return;
+
+      // Find or create instructor
+      let instrId="";
+      if(instructorName) {
+        let instr=newInstructors.find(i=>i.name.toLowerCase()===instructorName.toLowerCase());
+        if(!instr){
+          instr={id:uid(),name:instructorName,email:"",dept:"",maxLoad:8,available:true,colorId:"sky",availability:{}};
+          newInstructors.push(instr);
+          addedInstructors++;
+        }
+        instrId=instr.id;
+      }
+
+      // Find or create group
+      let groupId="";
+      if(groupName){
+        let grp=newGroups.find(g=>g.name.toLowerCase()===groupName.toLowerCase());
+        if(!grp){
+          grp={id:uid(),name:groupName,parentId:null,size:30};
+          newGroups.push(grp);
+          addedGroups++;
+        }
+        groupId=grp.id;
+      }
+
+      // Find or create course
+      let course=newCourses.find(c=>
+        c.code.toLowerCase()===courseCode.toLowerCase()||
+        c.name.toLowerCase()===courseName.toLowerCase()
+      );
+      if(!course){
+        course={
+          id:uid(),name:courseName,code:courseCode||courseName.slice(0,6).toUpperCase(),
+          colorId:COLORS[colorIdx%COLORS.length],
+          defaultInstructorId:instrId,
+          defaultGroupIds:groupId?[groupId]:[],
+          category:CATEGORIES.includes(category)?category:"Core",
+          credits,
+        };
+        newCourses.push(course);
+        colorIdx++;
+        addedCourses++;
+      } else {
+        // Update defaults if new info
+        if(instrId&&!course.defaultInstructorId) course.defaultInstructorId=instrId;
+        if(groupId&&!course.defaultGroupIds.includes(groupId))
+          course.defaultGroupIds=[...course.defaultGroupIds,groupId];
+      }
+    });
+
+    setState(s=>({...s,courses:newCourses,instructors:newInstructors,groups:newGroups}));
+    setParseResult({addedCourses,addedInstructors,addedGroups,total:rows.length});
+    toast(`Imported: ${addedCourses} courses, ${addedInstructors} instructors, ${addedGroups} groups`,"ok");
+    setStep("done");
+  }
+
+  return (
+    <Modal title="Import from CSV" subtitle="Add courses, instructors and groups in bulk" onClose={onClose} width={580}>
+      <div style={{padding:20}}>
+
+        {step==="upload"&&(
+          <>
+            <div style={{background:"var(--bg3)",border:"1px solid var(--border2)",borderRadius:"var(--r2)",
+              padding:20,textAlign:"center",marginBottom:16}}>
+              <div style={{fontSize:28,marginBottom:8}}>📄</div>
+              <div style={{fontSize:13,fontWeight:500,marginBottom:4}}>Drop your CSV file here or click to browse</div>
+              <div style={{fontSize:11,color:"var(--muted)",marginBottom:14}}>
+                Columns: Course Name, Course Code, Instructor, Student Group, Category, Credits
+              </div>
+              <input type="file" accept=".csv,.txt" onChange={e=>e.target.files[0]&&handleFile(e.target.files[0])}
+                style={{display:"none"}} id="csv-upload"/>
+              <div style={{display:"flex",gap:8,justifyContent:"center"}}>
+                <label htmlFor="csv-upload">
+                  <Btn variant="accent" as="span">Browse File</Btn>
+                </label>
+                <Btn variant="outline" onClick={downloadTemplate}>↓ Download Template</Btn>
+              </div>
+            </div>
+            {error&&<div style={{color:"var(--danger)",fontSize:11,marginBottom:12}}>{error}</div>}
+            <div style={{background:"var(--bg3)",borderRadius:"var(--r)",padding:12,
+              border:"1px solid var(--border)"}}>
+              <div style={{fontSize:10,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",
+                letterSpacing:"0.08em",marginBottom:8}}>Expected Format</div>
+              <pre style={{fontSize:10,fontFamily:"var(--mono)",color:"var(--muted)",
+                overflowX:"auto",lineHeight:1.6}}>
+{`Course Name,Course Code,Instructor,Student Group,Category,Credits
+Intro to Python,CS101,Dr. Alice Chen,CS-1A,Core,3
+Data Structures,CS201,Prof. Ben Okafor,CS-2A,Core,3`}
+              </pre>
+            </div>
+          </>
+        )}
+
+        {step==="preview"&&preview&&(
+          <>
+            <div style={{marginBottom:14}}>
+              <div style={{fontSize:12,fontWeight:600,marginBottom:10}}>
+                Column Mapping — {preview.rows.length} rows detected
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
+                {[
+                  ["courseName","Course Name *"],
+                  ["courseCode","Course Code"],
+                  ["instructor","Instructor"],
+                  ["group","Student Group"],
+                  ["category","Category"],
+                  ["credits","Credits"],
+                ].map(([key,label])=>(
+                  <Field key={key} label={label}>
+                    <select value={mapping[key]} onChange={e=>setMapping(m=>({...m,[key]:e.target.value}))}>
+                      <option value="">— Not mapped —</option>
+                      {preview.headers.map(h=><option key={h} value={h}>{h}</option>)}
+                    </select>
+                  </Field>
+                ))}
+              </div>
+            </div>
+
+            {/* Preview table */}
+            <div style={{background:"var(--bg3)",borderRadius:"var(--r)",padding:10,
+              border:"1px solid var(--border)",marginBottom:14,maxHeight:200,overflowY:"auto"}}>
+              <div style={{fontSize:10,color:"var(--muted)",marginBottom:8,fontWeight:600,
+                textTransform:"uppercase",letterSpacing:"0.08em"}}>
+                Preview (first 5 rows)
+              </div>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:10}}>
+                <thead>
+                  <tr>{preview.headers.map(h=>(
+                    <th key={h} style={{textAlign:"left",padding:"3px 6px",
+                      color:"var(--muted)",borderBottom:"1px solid var(--border)",fontWeight:600}}>
+                      {h}
+                    </th>
+                  ))}</tr>
+                </thead>
+                <tbody>
+                  {preview.rows.slice(0,5).map((row,i)=>(
+                    <tr key={i}>{row.map((cell,j)=>(
+                      <td key={j} style={{padding:"3px 6px",borderBottom:"1px solid var(--border)",
+                        color:"var(--text)"}}>{cell||<span style={{color:"var(--muted2)"}}>—</span>}</td>
+                    ))}</tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div style={{display:"flex",gap:8}}>
+              <Btn variant="outline" onClick={()=>setStep("upload")}>← Back</Btn>
+              <Btn variant="primary" onClick={handleImport}
+                disabled={!mapping.courseName}
+                style={{flex:1,justifyContent:"center"}}>
+                Import {preview.rows.length} Rows
+              </Btn>
+            </div>
+          </>
+        )}
+
+        {step==="done"&&parseResult&&(
+          <div style={{textAlign:"center",padding:"20px 0"}}>
+            <div style={{fontSize:36,marginBottom:12}}>✓</div>
+            <div style={{fontSize:14,fontWeight:600,color:"var(--accent)",marginBottom:16}}>
+              Import Complete
+            </div>
+            <div style={{display:"flex",gap:10,justifyContent:"center",marginBottom:20,flexWrap:"wrap"}}>
+              {[
+                ["Courses Added",parseResult.addedCourses,"green"],
+                ["Instructors Added",parseResult.addedInstructors,"blue"],
+                ["Groups Added",parseResult.addedGroups,"muted"],
+              ].map(([label,val,color])=>(
+                <div key={label} style={{background:"var(--bg3)",borderRadius:"var(--r2)",
+                  padding:"10px 16px",minWidth:100}}>
+                  <div style={{fontSize:22,fontWeight:700,fontFamily:"var(--mono)",
+                    color:color==="green"?"var(--accent)":color==="blue"?"var(--accent2)":"var(--text)"}}>
+                    {val}
+                  </div>
+                  <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>{label}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{fontSize:11,color:"var(--muted)",marginBottom:16}}>
+              All imported courses now appear in the Courses tab with their assigned instructors and groups.
+              Head to Auto-Schedule to place them on the timetable.
+            </div>
+            <Btn variant="primary" onClick={onClose} style={{minWidth:120,justifyContent:"center"}}>Done</Btn>
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  COURSES TAB
 // ═══════════════════════════════════════════════════════════════════
@@ -907,6 +1415,7 @@ function CoursesTab({state,setState,toast}) {
   const {courses,instructors,groups}=state;
   const [editing,setEditing]=useState(null);
   const [search,setSearch]=useState("");
+  const [showImport,setShowImport]=useState(false);
 
   const blank={id:"",name:"",code:"",colorId:"sky",defaultInstructorId:"",
     defaultGroupIds:[],category:"Core",credits:3};
@@ -947,9 +1456,10 @@ function CoursesTab({state,setState,toast}) {
         <div style={{padding:12,borderBottom:"1px solid var(--border)",display:"flex",gap:8}}>
           <input value={search} onChange={e=>setSearch(e.target.value)}
             placeholder="Search courses..." style={{flex:1}}/>
+          <Btn variant="outline" onClick={()=>setShowImport(true)}>↑ CSV</Btn>
           <Btn variant="accent" onClick={()=>setEditing({...blank})}>+ Add</Btn>
         </div>
-        <div style={{flex:1,overflowY:"auto"}}>
+        <div style={{flex:1,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch"}}>
           {filtered.map(c=>{
             const pal=PALETTE.find(p=>p.id===c.colorId)||PALETTE[0];
             const sessions=Object.values(state.appointments).filter(a=>a.courseId===c.id).length;
@@ -975,7 +1485,7 @@ function CoursesTab({state,setState,toast}) {
 
       {/* Editor */}
       {editing&&(
-        <div style={{flex:1,overflowY:"auto"}}>
+        <div style={{flex:1,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch"}}>
           <CourseEditor form={editing} setForm={setEditing}
             instructors={instructors} groups={groups}
             onSave={save} onDelete={editing.id?()=>remove(editing.id):null}
@@ -987,6 +1497,10 @@ function CoursesTab({state,setState,toast}) {
           color:"var(--muted2)",fontSize:12}}>
           Select a course to edit or click + Add
         </div>
+      )}
+      {showImport&&(
+        <CSVImportModal state={state} setState={setState} toast={toast}
+          onClose={()=>setShowImport(false)}/>
       )}
     </div>
   );
@@ -1111,7 +1625,7 @@ function InstructorsPanel({state,setState,toast}) {
           <Btn variant="accent" style={{width:"100%",justifyContent:"center"}}
             onClick={()=>setEditing({...blank})}>+ Add Instructor</Btn>
         </div>
-        <div style={{flex:1,overflowY:"auto"}}>
+        <div style={{flex:1,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch"}}>
           {instructors.map(i=>{
             const pal=PALETTE.find(p=>p.id===i.colorId)||PALETTE[0];
             const sessions=Object.values(appointments).filter(a=>a.instructorId===i.id).length;
@@ -1228,7 +1742,7 @@ function RoomsPanel({state,setState,toast}) {
         <div style={{padding:10,borderBottom:"1px solid var(--border)"}}>
           <Btn variant="accent" style={{width:"100%",justifyContent:"center"}} onClick={()=>setEditing({...blank})}>+ Add Room</Btn>
         </div>
-        <div style={{flex:1,overflowY:"auto"}}>
+        <div style={{flex:1,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch"}}>
           {rooms.map(r=>{
             const tc=typeColors[r.type]||"muted";
             return (
@@ -1327,7 +1841,7 @@ function GroupsPanel({state,setState,toast}) {
         <div style={{padding:10,borderBottom:"1px solid var(--border)"}}>
           <Btn variant="accent" style={{width:"100%",justifyContent:"center"}} onClick={()=>setEditing({...blank})}>+ Add Group</Btn>
         </div>
-        <div style={{flex:1,overflowY:"auto"}}>
+        <div style={{flex:1,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch"}}>
           {roots.map(g=><GroupNode key={g.id} g={g}/>)}
         </div>
       </div>
@@ -1432,7 +1946,7 @@ function InstructorTab({state,onApptClick}) {
           </div>
         </div>
       )}
-      <div style={{flex:1,overflow:"auto",padding:12}}>
+      <div style={{flex:1,overflowY:"auto",overflowX:"auto",padding:12,minHeight:0,WebkitOverflowScrolling:"touch"}}>
         <table style={{width:"100%",borderCollapse:"separate",borderSpacing:3}}>
           <thead>
             <tr>
@@ -2172,7 +2686,7 @@ function AutoScheduleTab({ state, setState, toast }) {
           </Btn>
         )}
       </div>
-      <div style={{flex:1,overflowY:"auto",padding:16}}>
+      <div style={{flex:1,overflowY:"auto",padding:16,minHeight:0,WebkitOverflowScrolling:"touch"}}>
         {/* Summary */}
         <div style={{display:"flex",gap:10,marginBottom:20,flexWrap:"wrap"}}>
           {[
@@ -2838,7 +3352,7 @@ function ActivityFeed({ roomCode, presence, selfId }) {
       </div>
 
       {/* Ops */}
-      <div style={{flex:1,overflowY:"auto",padding:14}}>
+      <div style={{flex:1,overflowY:"auto",padding:14,minHeight:0,WebkitOverflowScrolling:"touch"}}>
         <div style={{fontSize:10,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",
           letterSpacing:"0.08em",marginBottom:10}}>Recent Changes</div>
         {recent.length===0&&(
@@ -3052,7 +3566,7 @@ export default function TimetableBuilder() {
         </div>
 
         {/* Content */}
-        <main style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}}>
+        <main style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column",minHeight:0}}>
           {tab==="schedule"&&<ScheduleTab state={state} onApptClick={handleApptClick} onCellClick={handleCellClick} conflicts={conflicts}/>}
           {tab==="dashboard"&&<DashboardTab state={state} conflicts={conflicts}/>}
           {tab==="autoschedule"&&<AutoScheduleTab state={state} setState={setState} toast={toast.push}/>}
