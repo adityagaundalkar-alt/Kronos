@@ -3233,12 +3233,40 @@ function CollabModal({ onJoin, onClose, defaultName }) {
 function PresenceBar({ session, presence, syncing, lastSyncAt, onLeave, onCopyCode }) {
   const [copied, setCopied] = useState(false);
   const [ago, setAgo] = useState("");
+  const others = Object.entries(presence || {}).filter(([id]) => id !== session.userId);
   useEffect(()=>{
     const t=setInterval(()=>{
       if(lastSyncAt) setAgo(Math.round((Date.now()-lastSyncAt)/1000)+"s ago");
     },1000);
-    return ()=>clearInterval(t);
-  },[lastSyncAt]);
+    return (
+    <div style={{...}}>
+      {/* ... room pill ... */}
+
+      {/* Avatars */}
+      <div style={{display:"flex",alignItems:"center"}}>
+        <div title={session.userName+" (you)"} style={{...}}>
+          {initials(session.userName)}
+        </div>
+        {/* FIX 2: others is now safe because of Fix 1 */}
+        {others.slice(0,7).map(([id,p],i)=>(
+          <div key={id} title={p.name} style={{...}}>
+            {initials(p.name)}
+          </div>
+        ))}
+        {others.length > 7 && (
+          <div style={{...}}>+{others.length - 7}</div>
+        )}
+      </div>
+
+      <span style={{fontSize:10,color:"var(--muted)"}}>
+        {/* FIX 3: Use optional chaining or length check on presence keys */}
+        {Object.keys(presence || {}).length <= 1 ? "Just you" : `${Object.keys(presence || {}).length} online`}
+      </span>
+      
+      {/* ... rest of component ... */}
+    </div>
+  );
+}
 
   function copy() {
     navigator.clipboard?.writeText(session.roomCode).catch(()=>{});
