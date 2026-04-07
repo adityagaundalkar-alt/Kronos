@@ -3233,87 +3233,81 @@ function CollabModal({ onJoin, onClose, defaultName }) {
 function PresenceBar({ session, presence, syncing, lastSyncAt, onLeave, onCopyCode }) {
   const [copied, setCopied] = useState(false);
   const [ago, setAgo] = useState("");
-
-  useEffect(() => {
-    const t = setInterval(() => {
-      if (lastSyncAt) setAgo(Math.round((Date.now() - lastSyncAt) / 1000) + "s ago");
-    }, 1000);
-    return () => clearInterval(t);
-  }, [lastSyncAt]);
+  useEffect(()=>{
+    const t=setInterval(()=>{
+      if(lastSyncAt) setAgo(Math.round((Date.now()-lastSyncAt)/1000)+"s ago");
+    },1000);
+    return ()=>clearInterval(t);
+  },[lastSyncAt]);
 
   function copy() {
-    navigator.clipboard?.writeText(session.roomCode).catch(() => {});
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
+    navigator.clipboard?.writeText(session.roomCode).catch(()=>{});
+    setCopied(true); setTimeout(()=>setCopied(false),1800);
     onCopyCode?.();
   }
 
-  // Safe fallback for 'others' using optional chaining
-  const others = Object.entries(presence || {}).filter(([id]) => id !== session?.userId);
+  const others=Object.entries(presence).filter(([id])=>id!==session.userId);
 
   return (
-    <div style={{
-      height: 36, display: "flex", alignItems: "center", gap: 10, padding: "0 14px", flexShrink: 0,
-      background: "rgba(5,150,105,0.05)", borderBottom: "1px solid rgba(110,231,183,0.12)"
-    }}>
+    <div style={{height:36,display:"flex",alignItems:"center",gap:10,padding:"0 14px",flexShrink:0,
+      background:"rgba(5,150,105,0.05)",borderBottom:"1px solid rgba(110,231,183,0.12)"}}>
       {/* Room pill */}
       <button onClick={copy}
-        style={{
-          display: "flex", alignItems: "center", gap: 6, background: "rgba(5,150,105,0.08)",
-          border: "1px solid rgba(110,231,183,0.25)", borderRadius: 99, padding: "3px 10px",
-          cursor: "pointer", fontFamily: "var(--mono)", fontSize: 11, fontWeight: 700,
-          color: "var(--accent)", letterSpacing: "0.1em"
-        }}>
-        {session?.roomCode}
-        <span style={{
-          fontSize: 8, fontFamily: "'Outfit',sans-serif", fontWeight: 400,
-          color: copied ? "var(--accent)" : "var(--muted)", letterSpacing: "normal"
-        }}>
-          {copied ? "✓ copied" : "copy"}
+        style={{display:"flex",alignItems:"center",gap:6,background:"rgba(5,150,105,0.08)",
+          border:"1px solid rgba(110,231,183,0.25)",borderRadius:99,padding:"3px 10px",
+          cursor:"pointer",fontFamily:"var(--mono)",fontSize:11,fontWeight:700,
+          color:"var(--accent)",letterSpacing:"0.1em"}}>
+        {session.roomCode}
+        <span style={{fontSize:8,fontFamily:"'Outfit',sans-serif",fontWeight:400,
+          color:copied?"var(--accent)":"var(--muted)",letterSpacing:"normal"}}>
+          {copied?"✓ copied":"copy"}
         </span>
       </button>
 
       {/* Avatars */}
-      <div style={{ display: "flex", alignItems: "center" }}>
-        <div title={session?.userName + " (you)"}
-          style={{
-            width: 22, height: 22, borderRadius: "50%", background: (session?.userColor || "#ccc") + "22",
-            border: "2px solid " + (session?.userColor || "#ccc"), display: "flex", alignItems: "center",
-            justifyContent: "center", fontSize: 8, fontWeight: 700, color: session?.userColor,
-            zIndex: 20, marginRight: others.length ? -5 : 0
-          }}>
-          {initials(session?.userName || "U")}
+      <div style={{display:"flex",alignItems:"center"}}>
+        <div title={session.userName+" (you)"}
+          style={{width:22,height:22,borderRadius:"50%",background:session.userColor+"22",
+            border:"2px solid "+session.userColor,display:"flex",alignItems:"center",
+            justifyContent:"center",fontSize:8,fontWeight:700,color:session.userColor,
+            zIndex:20,marginRight:others.length?-5:0}}>
+          {initials(session.userName)}
         </div>
-        {others.slice(0, 7).map(([id, p], i) => (
+        {others.slice(0,7).map(([id,p],i)=>(
           <div key={id} title={p.name}
-            style={{
-              width: 22, height: 22, borderRadius: "50%", background: (p.color || "#ccc") + "22",
-              border: "2px solid " + (p.color || "#ccc"), display: "flex", alignItems: "center",
-              justifyContent: "center", fontSize: 8, fontWeight: 700, color: p.color,
-              zIndex: 19 - i, marginRight: i < Math.min(others.length - 1, 6) ? -5 : 0
-            }}>
-            {initials(p.name || "Anonymous")}
+            style={{width:22,height:22,borderRadius:"50%",background:p.color+"22",
+              border:"2px solid "+p.color,display:"flex",alignItems:"center",
+              justifyContent:"center",fontSize:8,fontWeight:700,color:p.color,
+              zIndex:19-i,marginRight:i<Math.min(others.length-1,6)?-5:0}}>
+            {initials(p.name)}
           </div>
         ))}
+        {others.length>7&&(
+          <div style={{width:22,height:22,borderRadius:"50%",background:"var(--bg4)",
+            border:"1px solid var(--border2)",display:"flex",alignItems:"center",
+            justifyContent:"center",fontSize:8,color:"var(--muted)",marginLeft:3}}>
+            +{others.length-7}
+          </div>
+        )}
       </div>
 
-      <span style={{ fontSize: 10, color: "var(--muted)" }}>
-        {Object.keys(presence || {}).length <= 1 ? "Just you" : `${Object.keys(presence || {}).length} online`}
+      <span style={{fontSize:10,color:"var(--muted)"}}>
+        {Object.keys(presence).length<=1?"Just you":`${Object.keys(presence).length} online`}
       </span>
 
-      <div style={{ flex: 1 }} />
+      <div style={{flex:1}}/>
 
-      {syncing && (
-        <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 9, color: "var(--accent)" }}>
-          <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--accent)", animation: "pulse 0.7s infinite" }} />
+      {syncing&&(
+        <div style={{display:"flex",alignItems:"center",gap:4,fontSize:9,color:"var(--accent)"}}>
+          <span style={{width:5,height:5,borderRadius:"50%",background:"var(--accent)",animation:"pulse 0.7s infinite"}}/>
           Syncing
         </div>
       )}
-      {!syncing && lastSyncAt && (
-        <span style={{ fontSize: 9, color: "var(--muted2)" }}>✓ {ago}</span>
+      {!syncing&&lastSyncAt&&(
+        <span style={{fontSize:9,color:"var(--muted2)"}}>✓ {ago}</span>
       )}
 
-      <Btn variant="danger" size="xs" onClick={onLeave} style={{ marginLeft: 4 }}>Leave</Btn>
+      <Btn variant="danger" size="xs" onClick={onLeave} style={{marginLeft:4}}>Leave</Btn>
     </div>
   );
 }
