@@ -1,4 +1,11 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import {
+  auth, db,
+  signInWithGoogle, signOutUser, onAuthChange,
+  loadUserState, saveUserState,
+  colLoad, colSave, colGetPresence, colSetPresence,
+  colPushOp, colGetOps, listRooms, registerRoom, subscribeToRoom,
+} from "./firebase.js";
 
 // ═══════════════════════════════════════════════════════════════════
 //  CONSTANTS
@@ -12,18 +19,19 @@ const WEEKS     = [
 const DEFAULT_SLOTS = [
   { id:"am", label:"09:00 – 12:00", short:"Morning"   },
   { id:"pm", label:"13:00 – 16:00", short:"Afternoon" },
+  { id:"ev", label:"17:00 – 20:00", short:"Evening"   },
 ];
 const PALETTE = [
-  { id:"sky",     accent:"#38bdf8", bg:"rgba(56,189,248,0.15)",  border:"rgba(56,189,248,0.4)"  },
-  { id:"emerald", accent:"#34d399", bg:"rgba(52,211,153,0.15)",  border:"rgba(52,211,153,0.4)"  },
-  { id:"rose",    accent:"#fb7185", bg:"rgba(251,113,133,0.15)", border:"rgba(251,113,133,0.4)" },
-  { id:"violet",  accent:"#a78bfa", bg:"rgba(167,139,250,0.15)", border:"rgba(167,139,250,0.4)" },
-  { id:"amber",   accent:"#fbbf24", bg:"rgba(251,191,36,0.15)",  border:"rgba(251,191,36,0.4)"  },
-  { id:"orange",  accent:"#f97316", bg:"rgba(249,115,22,0.15)",  border:"rgba(249,115,22,0.4)"  },
-  { id:"lime",    accent:"#a3e635", bg:"rgba(163,230,53,0.15)",  border:"rgba(163,230,53,0.4)"  },
-  { id:"pink",    accent:"#f472b6", bg:"rgba(244,114,182,0.15)", border:"rgba(244,114,182,0.4)" },
-  { id:"cyan",    accent:"#22d3ee", bg:"rgba(34,211,238,0.15)",  border:"rgba(34,211,238,0.4)"  },
-  { id:"slate",   accent:"#94a3b8", bg:"rgba(148,163,184,0.15)", border:"rgba(148,163,184,0.4)" },
+  { id:"sky",     accent:"#0284c7", bg:"rgba(2,132,199,0.10)",   border:"rgba(2,132,199,0.35)"   },
+  { id:"emerald", accent:"#059669", bg:"rgba(5,150,105,0.10)",   border:"rgba(5,150,105,0.35)"   },
+  { id:"rose",    accent:"#e11d48", bg:"rgba(225,29,72,0.08)",   border:"rgba(225,29,72,0.30)"   },
+  { id:"violet",  accent:"#7c3aed", bg:"rgba(124,58,237,0.09)",  border:"rgba(124,58,237,0.30)"  },
+  { id:"amber",   accent:"#b45309", bg:"rgba(180,83,9,0.09)",    border:"rgba(180,83,9,0.30)"    },
+  { id:"orange",  accent:"#c2410c", bg:"rgba(194,65,12,0.09)",   border:"rgba(194,65,12,0.30)"   },
+  { id:"lime",    accent:"#4d7c0f", bg:"rgba(77,124,15,0.09)",   border:"rgba(77,124,15,0.30)"   },
+  { id:"pink",    accent:"#be185d", bg:"rgba(190,24,93,0.08)",   border:"rgba(190,24,93,0.28)"   },
+  { id:"cyan",    accent:"#0e7490", bg:"rgba(14,116,144,0.09)",  border:"rgba(14,116,144,0.30)"  },
+  { id:"slate",   accent:"#475569", bg:"rgba(71,85,105,0.08)",   border:"rgba(71,85,105,0.25)"   },
 ];
 const ROOM_TYPES    = ["lecture","seminar","lab","studio","online"];
 const CATEGORIES    = ["Core","Elective","Lab","Workshop","Seminar"];
@@ -70,22 +78,11 @@ const saveLocal = s  => { try{ localStorage.setItem(LOCAL_KEY,JSON.stringify(s))
 
 // ═══════════════════════════════════════════════════════════════════
 //  COLLABORATION LAYER═══
-const USER_COLORS = ["#6ee7b7","#38bdf8","#f472b6","#a78bfa","#fbbf24","#f97316","#34d399","#fb7185"];
+const USER_COLORS = ["#059669","#0284c7","#be185d","#7c3aed","#b45309","#c2410c","#0e7490","#e11d48"];
 const userColor   = (idx) => USER_COLORS[idx % USER_COLORS.length];
 
-// ── Collaboration backend (localStorage for local dev)
-// To enable real multi-user sync, replace these with src/firebase.js exports
-function _lsGet(key) { try { const v=localStorage.getItem(key); return v?JSON.parse(v):null; } catch { return null; } }
-function _lsSet(key,val) { try { localStorage.setItem(key,JSON.stringify(val)); } catch {} }
-
-async function colLoad(roomCode) { return _lsGet("col:"+roomCode+":state"); }
-async function colSave(roomCode,state) { _lsSet("col:"+roomCode+":state",state); }
-async function colGetPresence(roomCode) { return _lsGet("col:"+roomCode+":presence")||{}; }
-async function colSetPresence(roomCode,presence) { _lsSet("col:"+roomCode+":presence",presence); }
-async function colPushOp(roomCode,op) { const ops=_lsGet("col:"+roomCode+":ops")||[]; ops.push(op); _lsSet("col:"+roomCode+":ops",ops.slice(-200)); }
-async function colGetOps(roomCode) { return _lsGet("col:"+roomCode+":ops")||[]; }
-async function listRooms() { return _lsGet("col:rooms:index")||[]; }
-async function registerRoom(code,name) { const rooms=await listRooms(); if(!rooms.find(r=>r.code===code)){ rooms.push({code,name,createdAt:Date.now()}); _lsSet("col:rooms:index",rooms); } }
+// Collab backend functions are imported from ./firebase.js
+// genRoomCode stays here (no Firebase needed)
 function genRoomCode() {
   const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   return Array.from({length:6},()=>chars[Math.floor(Math.random()*chars.length)]).join("");
@@ -210,31 +207,31 @@ const GLOBAL_CSS = `
 
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 html{font-size:15px;scroll-behavior:smooth;}
-body{background:#080a0e;color:#e4e8f0;font-family:'Outfit',sans-serif;overflow-x:hidden;}
+body{background:#f0f2f5;color:#1a1d27;font-family:'Outfit',sans-serif;overflow-x:hidden;}
 :root{
-  --bg:     #080a0e;
-  --bg2:    #0e1018;
-  --bg3:    #141720;
-  --bg4:    #1a1e28;
-  --bg5:    #222736;
-  --border: rgba(255,255,255,0.07);
-  --border2:rgba(255,255,255,0.12);
-  --text:   #e4e8f0;
-  --muted:  #7a8299;
-  --muted2: #4a5066;
-  --accent: #6ee7b7;
-  --accent2:#3b82f6;
-  --danger: #f87171;
-  --warn:   #fbbf24;
+  --bg:     #f0f2f5;
+  --bg2:    #ffffff;
+  --bg3:    #f7f8fa;
+  --bg4:    #eef0f4;
+  --bg5:    #e4e7ed;
+  --border: rgba(0,0,0,0.08);
+  --border2:rgba(0,0,0,0.14);
+  --text:   #1a1d27;
+  --muted:  #6b7280;
+  --muted2: #9ca3af;
+  --accent: #059669;
+  --accent2:#2563eb;
+  --danger: #dc2626;
+  --warn:   #d97706;
   --mono:   'JetBrains Mono',monospace;
   --r:      6px;
   --r2:     10px;
   --r3:     14px;
-  --shadow: 0 4px 24px rgba(0,0,0,0.5);
-  --glow:   0 0 0 1px rgba(110,231,183,0.3);
+  --shadow: 0 2px 12px rgba(0,0,0,0.10);
+  --glow:   0 0 0 2px rgba(5,150,105,0.2);
 }
 input,select,textarea{
-  background:var(--bg3);color:var(--text);border:1px solid var(--border2);
+  background:#ffffff;color:var(--text);border:1px solid var(--border2);
   border-radius:var(--r);padding:8px 11px;font-family:inherit;font-size:13px;
   outline:none;transition:border-color 0.15s;width:100%;
 }
@@ -242,9 +239,9 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:va
 input[type=checkbox]{width:auto;cursor:pointer;accent-color:var(--accent);}
 input[type=range]{width:auto;padding:0;background:transparent;border:none;}
 button{font-family:inherit;cursor:pointer;border:none;outline:none;transition:all 0.15s;}
-::-webkit-scrollbar{width:4px;height:4px;}
+::-webkit-scrollbar{width:6px;height:6px;}
 ::-webkit-scrollbar-track{background:transparent;}
-::-webkit-scrollbar-thumb{background:var(--muted2);border-radius:2px;}
+::-webkit-scrollbar-thumb{background:var(--muted2);border-radius:3px;}
 ::-webkit-scrollbar-thumb:hover{background:var(--muted);}
 @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 @keyframes slideIn{from{opacity:0;transform:translateX(16px)}to{opacity:1;transform:none}}
@@ -252,8 +249,7 @@ button{font-family:inherit;cursor:pointer;border:none;outline:none;transition:al
 @keyframes spin{to{transform:rotate(360deg)}}
 .fade-in{animation:fadeIn 0.2s ease}
 .slide-in{animation:slideIn 0.2s ease}
-[data-scroll]{overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;}
-.scroll-area{overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;min-height:0;}
+html,body,#root{height:100%;overflow:hidden;}
 `;
 
 // ═══════════════════════════════════════════════════════════════════
@@ -262,12 +258,12 @@ button{font-family:inherit;cursor:pointer;border:none;outline:none;transition:al
 
 function Badge({children,color="muted",style={}}) {
   const colors={
-    muted:{bg:"var(--bg4)",color:"var(--muted)",border:"var(--border)"},
+    muted:{bg:"var(--bg4)",color:"var(--muted)",border:"1px solid var(--border2)"},
     green:{bg:"rgba(52,211,153,0.12)",color:"#34d399",border:"rgba(52,211,153,0.25)"},
     red:{bg:"rgba(248,113,113,0.12)",color:"#f87171",border:"rgba(248,113,113,0.25)"},
     yellow:{bg:"rgba(251,191,36,0.12)",color:"#fbbf24",border:"rgba(251,191,36,0.25)"},
     blue:{bg:"rgba(59,130,246,0.12)",color:"#60a5fa",border:"rgba(59,130,246,0.25)"},
-    accent:{bg:"rgba(110,231,183,0.12)",color:"#6ee7b7",border:"rgba(110,231,183,0.25)"},
+    accent:{bg:"rgba(5,150,105,0.10)",color:"var(--accent)",border:"rgba(5,150,105,0.22)"},
   };
   const c=colors[color]||colors.muted;
   return (
@@ -284,9 +280,9 @@ function Btn({children,onClick,variant="ghost",size="sm",style={},disabled=false
     ghost:{background:"transparent",color:"var(--muted)",border:"1px solid transparent"},
     outline:{background:"transparent",color:"var(--text)",border:"1px solid var(--border2)"},
     solid:{background:"var(--bg4)",color:"var(--text)",border:"1px solid var(--border2)"},
-    accent:{background:"rgba(110,231,183,0.15)",color:"var(--accent)",border:"1px solid rgba(110,231,183,0.3)"},
+    accent:{background:"rgba(5,150,105,0.12)",color:"var(--accent)",border:"1px solid rgba(110,231,183,0.3)"},
     danger:{background:"rgba(248,113,113,0.12)",color:"var(--danger)",border:"1px solid rgba(248,113,113,0.25)"},
-    primary:{background:"var(--accent)",color:"#080a0e",border:"none"},
+    primary:{background:"var(--accent)",color:"#ffffff",border:"none"},
   };
   const sizes={xs:{padding:"3px 8px",fontSize:10},sm:{padding:"5px 10px",fontSize:11},md:{padding:"7px 14px",fontSize:12}};
   const v=variants[variant]||variants.ghost;
@@ -311,7 +307,7 @@ function Modal({title,subtitle,onClose,children,width=520}) {
   },[onClose]);
   return (
     <div onClick={e=>{if(e.target===e.currentTarget)onClose();}}
-      style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:200,
+      style={{position:"fixed",inset:0,background:"rgba(15,20,40,0.55)",zIndex:200,
         display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
       <div className="fade-in" style={{background:"var(--bg2)",border:"1px solid var(--border2)",
         borderRadius:"var(--r3)",width:"100%",maxWidth:width,maxHeight:"90vh",
@@ -324,7 +320,7 @@ function Modal({title,subtitle,onClose,children,width=520}) {
           </div>
           <Btn onClick={onClose} style={{fontSize:14,padding:"4px 8px"}}>✕</Btn>
         </div>
-        <div style={{overflowY:"auto",flex:1}}>
+        <div style={{overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",flex:1}}>
           {children}
         </div>
       </div>
@@ -376,7 +372,7 @@ function MultiSelect({options,value=[],onChange,placeholder="Select..."}) {
       {open&&(
         <div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:50,
           background:"var(--bg3)",border:"1px solid var(--border2)",borderRadius:"var(--r)",
-          marginTop:2,maxHeight:180,overflowY:"auto",boxShadow:"var(--shadow)"}}>
+          marginTop:2,maxHeight:180,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",boxShadow:"var(--shadow)"}}>
           {options.map(o=>{
             const sel=value.includes(o.value);
             return (
@@ -402,10 +398,10 @@ function MultiSelect({options,value=[],onChange,placeholder="Select..."}) {
 //  TOAST RENDERER
 // ═══════════════════════════════════════════════════════════════════
 function Toasts({list,dismiss}) {
-  const colors={ok:{bg:"rgba(52,211,153,0.15)",border:"rgba(52,211,153,0.3)",color:"#34d399"},
-    error:{bg:"rgba(248,113,113,0.15)",border:"rgba(248,113,113,0.3)",color:"#f87171"},
-    warn:{bg:"rgba(251,191,36,0.15)",border:"rgba(251,191,36,0.3)",color:"#fbbf24"},
-    info:{bg:"rgba(59,130,246,0.15)",border:"rgba(59,130,246,0.3)",color:"#60a5fa"}};
+  const colors={ok:{bg:"#f0fdf4",border:"#86efac",color:"#15803d"},
+    error:{bg:"#fef2f2",border:"#fca5a5",color:"#dc2626"},
+    warn:{bg:"#fffbeb",border:"#fcd34d",color:"#b45309"},
+    info:{bg:"#eff6ff",border:"#93c5fd",color:"#1d4ed8"}};
   return (
     <div style={{position:"fixed",bottom:20,right:20,zIndex:999,display:"flex",flexDirection:"column",gap:8}}>
       {list.map(t=>{
@@ -414,7 +410,7 @@ function Toasts({list,dismiss}) {
           <div key={t.id} className="slide-in" onClick={()=>dismiss(t.id)}
             style={{background:c.bg,border:`1px solid ${c.border}`,color:c.color,
               padding:"10px 14px",borderRadius:"var(--r2)",fontSize:12,fontWeight:500,
-              cursor:"pointer",minWidth:240,boxShadow:"var(--shadow)",backdropFilter:"blur(8px)"}}>
+              cursor:"pointer",minWidth:240,boxShadow:"var(--shadow)"}}>
             {t.msg}
           </div>
         );
@@ -432,7 +428,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
   const [form,setForm]=useState(()=>{
     if(isEdit) return {...appt};
     const w=weekNum??1,d=dayIdx??0,t=timeId??slots[0]?.id;
-    return {weekNum:w,dayIdx:d,timeId:t,courseId:"",instructorId:"",roomId:"",groupIds:[],notes:""};
+    return {weekNum:w,dayIdx:d,timeId:t,courseId:"",instructorId:"",roomId:"",groupIds:[],section:"",notes:""};
   });
   const [scheduleAll,setScheduleAll]=useState(false);
   const [overrides,setOverrides]=useState({instructor:false,room:false,group:false});
@@ -455,7 +451,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
     if(!form.courseId||!form.weekNum===undefined) return;
     if(blockingConflicts.length) return;
     const course=courses.find(x=>x.id===form.courseId);
-    const base={...form,courseName:course?.name,courseCode:course?.code};
+    const base={...form,courseName:course?.name,courseCode:course?.code,section:form.section||""};
     const toSave=[];
     if(scheduleAll&&!isEdit) {
       WEEKS.filter(w=>w.n>0).forEach(w=>{
@@ -537,11 +533,17 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
           />
         </Field>
 
-        {/* Notes */}
-        <Field label="Notes" hint="Optional session notes">
-          <textarea value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))}
-            rows={2} style={{resize:"vertical"}} placeholder="Any notes for this session..."/>
-        </Field>
+        {/* Section + Notes */}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 2fr",gap:8,marginBottom:12}}>
+          <Field label="Section" hint="e.g. A, B, 1, 2">
+            <input value={form.section||""} onChange={e=>setForm(f=>({...f,section:e.target.value}))}
+              placeholder="e.g. A"/>
+          </Field>
+          <Field label="Notes" hint="Optional session notes">
+            <input value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))}
+              placeholder="Any notes for this session..."/>
+          </Field>
+        </div>
 
         {/* Conflicts */}
         {conflicts.length>0&&(
@@ -612,15 +614,15 @@ function ApptChip({appt,courses,instructors,rooms,onClick,conflicts=[]}) {
       )}
       <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:2}}>
         <span style={{fontSize:9,fontFamily:"var(--mono)",fontWeight:600,color:pal.accent,
-          background:`rgba(0,0,0,0.2)`,padding:"1px 4px",borderRadius:3}}>
-          {appt.courseCode}
+          background:"rgba(0,0,0,0.06)",padding:"1px 4px",borderRadius:3}}>
+          {appt.courseCode}{appt.section?` §${appt.section}`:""}
         </span>
       </div>
       <div style={{fontSize:10,fontWeight:500,color:pal.accent,lineHeight:1.3,
         whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
         {appt.courseName}
       </div>
-      {instr&&<div style={{fontSize:9,color:"rgba(255,255,255,0.5)",marginTop:2,
+      {instr&&<div style={{fontSize:9,color:"var(--muted)",marginTop:2,
         whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
         {instr.name.split(" ").slice(-1)[0]}
         {room?" · "+room.name:""}
@@ -884,7 +886,7 @@ function ScheduleTab({state,onApptClick,onCellClick,conflicts}) {
   },[filteredAppts]);
 
   return (
-    <div style={{display:"flex",flexDirection:"column",height:"100%"}}>
+    <div style={{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden",minHeight:0}}>
       {/* Controls */}
       <div style={{padding:"12px 16px",borderBottom:"1px solid var(--border)",
         display:"flex",alignItems:"center",gap:10,flexShrink:0,flexWrap:"wrap"}}>
@@ -1030,7 +1032,7 @@ function DashboardTab({state,conflicts}) {
   );
 
   return (
-    <div style={{padding:16,overflowY:"auto",height:"100%"}}>
+    <div style={{padding:16,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",height:"100%"}}>
       <div style={{marginBottom:20}}>
         <div style={{fontSize:16,fontWeight:700,marginBottom:4}}>Overview</div>
         <div style={{color:"var(--muted)",fontSize:11}}>{state.settings.semester}</div>
@@ -1337,7 +1339,7 @@ Data Structures,CS201,Prof. Ben Okafor,CS-2A,Core,3`}
 
             {/* Preview table */}
             <div style={{background:"var(--bg3)",borderRadius:"var(--r)",padding:10,
-              border:"1px solid var(--border)",marginBottom:14,maxHeight:200,overflowY:"auto"}}>
+              border:"1px solid var(--border)",marginBottom:14,maxHeight:200,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain"}}>
               <div style={{fontSize:10,color:"var(--muted)",marginBottom:8,fontWeight:600,
                 textTransform:"uppercase",letterSpacing:"0.08em"}}>
                 Preview (first 5 rows)
@@ -1657,7 +1659,7 @@ function InstructorsPanel({state,setState,toast}) {
         </div>
       </div>
       {editing&&(
-        <div style={{flex:1,padding:20,overflowY:"auto"}}>
+        <div style={{flex:1,padding:20,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain"}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
             <div style={{fontSize:13,fontWeight:600}}>{editing.id?"Edit Instructor":"New Instructor"}</div>
             <div style={{display:"flex",gap:6}}>
@@ -1761,7 +1763,7 @@ function RoomsPanel({state,setState,toast}) {
         </div>
       </div>
       {editing&&(
-        <div style={{flex:1,padding:20,overflowY:"auto"}}>
+        <div style={{flex:1,padding:20,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain"}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
             <div style={{fontSize:13,fontWeight:600}}>{editing.id?"Edit Room":"New Room"}</div>
             <div style={{display:"flex",gap:6}}>
@@ -1845,7 +1847,7 @@ function GroupsPanel({state,setState,toast}) {
         </div>
       </div>
       {editing&&(
-        <div style={{flex:1,padding:20,overflowY:"auto"}}>
+        <div style={{flex:1,padding:20,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain"}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
             <div style={{fontSize:13,fontWeight:600}}>{editing.id?"Edit Group":"New Group"}</div>
             <div style={{display:"flex",gap:6}}>
@@ -2013,7 +2015,7 @@ function ConflictsTab({conflicts,state,onApptClick}) {
   const typeColor={instructor:"var(--danger)",room:"var(--warn)",group:"var(--accent2)"};
 
   return (
-    <div style={{padding:16,overflowY:"auto",height:"100%"}}>
+    <div style={{padding:16,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",height:"100%"}}>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}>
         <div style={{fontSize:14,fontWeight:700}}>Conflict Report</div>
         <Badge color="red">{conflicts.length} issue{conflicts.length!==1?"s":""}</Badge>
@@ -2069,7 +2071,7 @@ function ChangelogTab({log}) {
     </div>
   );
   return (
-    <div style={{padding:16,overflowY:"auto",height:"100%"}}>
+    <div style={{padding:16,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",height:"100%"}}>
       <div style={{fontSize:13,fontWeight:600,marginBottom:12}}>Activity Log</div>
       {[...log].reverse().map((e,i)=>(
         <div key={i} style={{display:"flex",gap:10,marginBottom:8,paddingBottom:8,
@@ -2146,7 +2148,7 @@ function SettingsTab({state,setState,toast}) {
   }
 
   return (
-    <div style={{padding:20,overflowY:"auto",height:"100%",maxWidth:640}}>
+    <div style={{padding:20,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",height:"100%",maxWidth:640}}>
       <div style={{fontSize:14,fontWeight:700,marginBottom:20}}>Settings</div>
 
       <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:16,marginBottom:16}}>
@@ -2384,7 +2386,7 @@ function AvailabilityGrid({ availability={}, onChange, slots, compact=false }) {
                     <div onClick={()=>toggle(di,slot.id)}
                       style={{width:compact?24:30,height:compact?22:26,borderRadius:4,cursor:"pointer",
                         display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto",
-                        background:on?"rgba(110,231,183,0.2)":"var(--bg3)",
+                        background:on?"rgba(5,150,105,0.15)":"var(--bg3)",
                         border:`1px solid ${on?"rgba(110,231,183,0.5)":"var(--border)"}`,
                         transition:"all 0.1s",userSelect:"none"}}>
                       {on&&<span style={{fontSize:8,color:"var(--accent)",fontWeight:700}}>✓</span>}
@@ -2560,8 +2562,8 @@ function AutoScheduleTab({ state, setState, toast }) {
           <div key={i} style={{display:"flex",alignItems:"center",gap:6}}>
             <div style={{width:20,height:20,borderRadius:"50%",display:"flex",alignItems:"center",
               justifyContent:"center",fontSize:9,fontWeight:700,
-              background:step===i?"var(--accent)":step>i?"rgba(110,231,183,0.2)":"var(--bg4)",
-              color:step===i?"#080a0e":step>i?"var(--accent)":"var(--muted)"}}>
+              background:step===i?"var(--accent)":step>i?"rgba(5,150,105,0.15)":"var(--bg4)",
+              color:step===i?"#ffffff":step>i?"var(--accent)":"var(--muted)"}}>
               {step>i?"✓":i+1}
             </div>
             <span style={{fontSize:10,color:step===i?"var(--text)":"var(--muted)",fontWeight:step===i?600:400}}>
@@ -2573,7 +2575,7 @@ function AutoScheduleTab({ state, setState, toast }) {
       </div>
 
       {/* Job list */}
-      <div style={{flex:1,overflowY:"auto",padding:12,display:"flex",flexDirection:"column",gap:10}}>
+      <div style={{flex:1,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",padding:12,display:"flex",flexDirection:"column",gap:10}}>
         {jobs.map((job,ji)=>(
           <JobCard key={job.id} job={job} ji={ji}
             courses={courses} instructors={instructors} groups={groups}
@@ -2610,7 +2612,7 @@ function AutoScheduleTab({ state, setState, toast }) {
           {running?<span style={{animation:"pulse 1s infinite"}}>Running…</span>:"⚡ Run Scheduler"}
         </Btn>
       </div>
-      <div style={{flex:1,overflowY:"auto",padding:16,display:"flex",flexDirection:"column",gap:10}}>
+      <div style={{flex:1,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",padding:16,display:"flex",flexDirection:"column",gap:10}}>
         {preview.map(({job,course,instr,weeks,slots_},i)=>{
           if(!course) return null;
           const pal=PALETTE.find(p=>p.id===course.colorId)||PALETTE[0];
@@ -2916,7 +2918,7 @@ function JobCard({ job, ji, courses, instructors, groups, rooms, slots, state, o
                     <button key={w} onClick={()=>onUpdate({customWeeks:on?job.customWeeks.filter(x=>x!==w):[...job.customWeeks,w].sort((a,b)=>a-b)})}
                       style={{width:36,height:28,borderRadius:"var(--r)",fontSize:10,
                         fontFamily:"var(--mono)",cursor:"pointer",border:"none",fontWeight:500,
-                        background:on?"rgba(110,231,183,0.2)":"var(--bg4)",
+                        background:on?"rgba(5,150,105,0.15)":"var(--bg4)",
                         color:on?"var(--accent)":"var(--muted)",
                         outline:on?"1px solid rgba(110,231,183,0.4)":"none"}}>
                       W{w}
@@ -2977,8 +2979,8 @@ function JobCard({ job, ji, courses, instructors, groups, rooms, slots, state, o
                               !info.grpOk?"Group has class":"Available"
                             } style={{width:28,height:22,borderRadius:4,margin:"0 auto",
                               display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,
-                              background:used?"var(--bg4)":info.free?"rgba(110,231,183,0.12)":"rgba(248,113,113,0.12)",
-                              border:`1px solid ${used?"var(--border)":info.free?"rgba(110,231,183,0.3)":"rgba(248,113,113,0.3)"}`,
+                              background:used?"var(--bg4)":info.free?"rgba(5,150,105,0.10)":"rgba(248,113,113,0.12)",
+                              border:`1px solid ${used?"var(--border)":info.free?"rgba(5,150,105,0.30)":"rgba(248,113,113,0.3)"}`,
                               color:used?"var(--muted2)":info.free?"var(--accent)":"var(--danger)"}}>
                               {used?"—":info.free?"✓":(!info.instrOk&&!info.grpOk?"✗I+G":!info.instrOk?"✗I":"✗G")}
                             </div>
@@ -3123,7 +3125,7 @@ function CollabModal({ onJoin, onClose, defaultName }) {
   const [mode, setMode] = useState("pick");
   const [roomName, setRoomName] = useState("");
   const [joinCode, setJoinCode] = useState("");
-  const [userName, setUserName] = useState(defaultName||"");
+  const [userName, setUserName] = useState(auth.currentUser?.displayName||defaultName||"");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [knownRooms, setKnownRooms] = useState([]);
@@ -3134,7 +3136,7 @@ function CollabModal({ onJoin, onClose, defaultName }) {
     if(!roomName.trim()){setError("Enter a room name");return;}
     setLoading(true); setError("");
     const code=genRoomCode();
-    await registerRoom(code,roomName.trim());
+    await registerRoom(code,roomName.trim(),auth.currentUser?.uid||"anonymous");
     await onJoin(code,userName.trim(),true);
     setLoading(false);
   }
@@ -3159,7 +3161,7 @@ function CollabModal({ onJoin, onClose, defaultName }) {
         {mode==="pick"&&(
           <div style={{display:"flex",flexDirection:"column",gap:10,marginTop:4}}>
             <button onClick={()=>setMode("create")}
-              style={{background:"rgba(110,231,183,0.08)",border:"1px solid rgba(110,231,183,0.25)",
+              style={{background:"rgba(5,150,105,0.08)",border:"1px solid rgba(110,231,183,0.25)",
                 borderRadius:"var(--r2)",padding:"14px 16px",cursor:"pointer",textAlign:"left",color:"var(--text)",fontFamily:"inherit"}}>
               <div style={{fontSize:13,fontWeight:600,color:"var(--accent)",marginBottom:3}}>⊕ Create a Room</div>
               <div style={{fontSize:11,color:"var(--muted)"}}>Start a new session · share the code with your team</div>
@@ -3248,10 +3250,10 @@ function PresenceBar({ session, presence, syncing, lastSyncAt, onLeave, onCopyCo
 
   return (
     <div style={{height:36,display:"flex",alignItems:"center",gap:10,padding:"0 14px",flexShrink:0,
-      background:"rgba(110,231,183,0.05)",borderBottom:"1px solid rgba(110,231,183,0.12)"}}>
+      background:"rgba(5,150,105,0.05)",borderBottom:"1px solid rgba(110,231,183,0.12)"}}>
       {/* Room pill */}
       <button onClick={copy}
-        style={{display:"flex",alignItems:"center",gap:6,background:"rgba(110,231,183,0.1)",
+        style={{display:"flex",alignItems:"center",gap:6,background:"rgba(5,150,105,0.08)",
           border:"1px solid rgba(110,231,183,0.25)",borderRadius:99,padding:"3px 10px",
           cursor:"pointer",fontFamily:"var(--mono)",fontSize:11,fontWeight:700,
           color:"var(--accent)",letterSpacing:"0.1em"}}>
@@ -3386,15 +3388,128 @@ function ActivityFeed({ roomCode, presence, selfId }) {
 
 // ═══════════════════════════════════════════════════════════════════
 //  ROOT APP
+
+// ═══════════════════════════════════════════════════════════════════
+//  AUTH HOOK
+// ═══════════════════════════════════════════════════════════════════
+function useAuth() {
+  const [user, setUser]       = useState(undefined); // undefined = loading
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const unsub = onAuthChange(u => {
+      setUser(u);
+      setLoading(false);
+    });
+    return unsub;
+  }, []);
+
+  return { user, loading };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  LOGIN SCREEN
+// ═══════════════════════════════════════════════════════════════════
+function LoginScreen({ onSkip }) {
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState("");
+
+  async function handleGoogle() {
+    setLoading(true); setError("");
+    try {
+      await signInWithGoogle();
+    } catch(e) {
+      setError(e.message || "Sign-in failed. Check your Firebase config.");
+    }
+    setLoading(false);
+  }
+
+  return (
+    <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",
+      background:"var(--bg)",fontFamily:"'Outfit',sans-serif"}}>
+      <div style={{width:380,padding:36,background:"var(--bg2)",borderRadius:"var(--r3)",
+        border:"1px solid var(--border2)",boxShadow:"var(--shadow)",textAlign:"center"}}>
+
+        {/* Logo */}
+        <div style={{width:48,height:48,borderRadius:12,background:"var(--accent)",
+          display:"flex",alignItems:"center",justifyContent:"center",
+          fontSize:22,fontWeight:800,color:"#fff",margin:"0 auto 16px"}}>K</div>
+
+        <div style={{fontSize:22,fontWeight:700,marginBottom:6}}>Welcome to Kronos</div>
+        <div style={{fontSize:13,color:"var(--muted)",marginBottom:28}}>
+          Sign in to save your timetable and collaborate with your team
+        </div>
+
+        {/* Google sign-in */}
+        <button onClick={handleGoogle} disabled={loading}
+          style={{width:"100%",padding:"11px 16px",borderRadius:"var(--r2)",
+            background:loading?"var(--bg4)":"var(--text)",color:loading?"var(--muted)":"var(--bg2)",
+            border:"1px solid var(--border2)",fontSize:14,fontWeight:600,
+            cursor:loading?"not-allowed":"pointer",fontFamily:"inherit",
+            display:"flex",alignItems:"center",justifyContent:"center",gap:10,
+            marginBottom:12,transition:"all 0.15s"}}>
+          <svg width="18" height="18" viewBox="0 0 18 18">
+            <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z"/>
+            <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332C2.438 15.983 5.482 18 9 18z"/>
+            <path fill="#FBBC05" d="M3.964 10.71c-.18-.54-.282-1.117-.282-1.71s.102-1.17.282-1.71V4.958H.957C.347 6.173 0 7.548 0 9s.348 2.827.957 4.042l3.007-2.332z"/>
+            <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017.957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/>
+          </svg>
+          {loading ? "Signing in…" : "Continue with Google"}
+        </button>
+
+        {error && (
+          <div style={{fontSize:11,color:"var(--danger)",marginBottom:12,
+            padding:"8px 10px",background:"rgba(220,38,38,0.08)",borderRadius:"var(--r)"}}>
+            {error}
+          </div>
+        )}
+
+        {/* Skip option */}
+        <button onClick={onSkip}
+          style={{width:"100%",padding:"9px",borderRadius:"var(--r2)",
+            background:"transparent",color:"var(--muted)",border:"1px solid var(--border)",
+            fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>
+          Continue without account
+        </button>
+
+        <div style={{fontSize:11,color:"var(--muted2)",marginTop:16,lineHeight:1.5}}>
+          Signing in saves your timetable to the cloud so you can access it from any device.
+          Without an account, data is only saved in this browser.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════
 export default function TimetableBuilder() {
-  const [state,setStateRaw]=useState(()=>loadLocal()||seed());
-  const [tab,setTab]=useState("schedule");
-  const [modal,setModal]=useState(null);
-  const [showCollab,setShowCollab]=useState(false);
-  const [showActivity,setShowActivity]=useState(false);
-  const [userName,setUserName]=useState(()=>localStorage.getItem("kronos_user")||"");
-  const toast=useToasts();
+  const { user, loading: authLoading } = useAuth();
+  const [skipAuth, setSkipAuth]         = useState(false);
+  const [state,    setStateRaw]         = useState(()=>loadLocal()||seed());
+  const [tab,      setTab]              = useState("schedule");
+  const [modal,    setModal]            = useState(null);
+  const [showCollab,setShowCollab]      = useState(false);
+  const [userName, setUserName]         = useState(()=>localStorage.getItem("kronos_user")||"");
+  const [cloudSaving, setCloudSaving]   = useState(false);
+  const [lastCloudSave, setLastCloudSave] = useState(null);
+  const saveTimerRef                    = useRef(null);
+  const toast                           = useToasts();
+
+  // ── Load user's cloud state when they sign in ─────────────────────
+  useEffect(()=>{
+    if(!user) return;
+    setUserName(user.displayName||user.email||"");
+    localStorage.setItem("kronos_user", user.displayName||user.email||"");
+    (async()=>{
+      const remote = await loadUserState(user.uid);
+      if(remote) {
+        const { _savedAt, ...appState } = remote;
+        setStateRaw(appState);
+        saveLocal(appState);
+        toast.push("Timetable loaded from cloud ✓","ok");
+      }
+    })();
+  },[user?.uid]);
 
   // ── Wrap setState to also push to collab room ─────────────────────
   const collab=useCollaboration(state,
@@ -3407,9 +3522,19 @@ export default function TimetableBuilder() {
       const next=typeof updater==="function"?updater(prev):updater;
       saveLocal(next);
       if(collab.session) collab.pushState(next,opType,opDetail);
+      // Debounced cloud save (2s after last change)
+      if(user) {
+        clearTimeout(saveTimerRef.current);
+        setCloudSaving(true);
+        saveTimerRef.current = setTimeout(async()=>{
+          await saveUserState(user.uid, next);
+          setCloudSaving(false);
+          setLastCloudSave(Date.now());
+        }, 2000);
+      }
       return next;
     });
-  },[collab.session,collab.pushState]);
+  },[collab.session,collab.pushState,user]);
 
   const conflicts=useMemo(()=>getAllConflicts(state.appointments),[state.appointments]);
 
@@ -3447,8 +3572,9 @@ export default function TimetableBuilder() {
   }
 
   async function handleJoinRoom(code,name,isOwner) {
-    if(name) { setUserName(name); localStorage.setItem("kronos_user",name); }
-    await collab.joinRoom(code,name,isOwner);
+    const displayName = user?.displayName || name;
+    if(displayName) { setUserName(displayName); localStorage.setItem("kronos_user",displayName); }
+    await collab.joinRoom(code,displayName||name,isOwner);
     setShowCollab(false);
     toast.push(isOwner?`Room ${code} created — share this code!`:`Joined room ${code}`,"ok");
   }
@@ -3460,26 +3586,50 @@ export default function TimetableBuilder() {
     return ()=>el.remove();
   },[]);
 
+  // Show login screen while auth loading or if not signed in and not skipped
+  if(authLoading) return (
+    <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",
+      background:"var(--bg)",fontFamily:"'Outfit',sans-serif"}}>
+      <div style={{textAlign:"center"}}>
+        <div style={{width:40,height:40,borderRadius:10,background:"var(--accent)",
+          display:"flex",alignItems:"center",justifyContent:"center",
+          fontSize:18,fontWeight:800,color:"#fff",margin:"0 auto 12px"}}>K</div>
+        <div style={{color:"var(--muted)",fontSize:13}}>Loading…</div>
+      </div>
+    </div>
+  );
+  if(!user && !skipAuth) return <LoginScreen onSkip={()=>setSkipAuth(true)}/>;
+
   const conflictCount=conflicts.length;
   const TABS_WITH_ACTIVITY = collab.session
     ? [...TABS,{id:"activity",icon:"◉",label:"Activity"}]
     : TABS;
 
   return (
-    <div style={{display:"flex",flexDirection:"column",height:"100vh",background:"var(--bg)",
-      fontFamily:"'Outfit',sans-serif",overflow:"hidden"}}>
+    <div style={{display:"flex",flexDirection:"column",height:"100vh",background:"var(--bg)",fontFamily:"'Outfit',sans-serif",overflow:"hidden",position:"fixed",inset:0}}>
 
       {/* Top bar */}
       <div style={{height:48,display:"flex",alignItems:"center",padding:"0 16px",
-        borderBottom:"1px solid var(--border)",background:"var(--bg2)",flexShrink:0,gap:10}}>
+        borderBottom:"1px solid var(--border)",background:"var(--bg2)",flexShrink:0,gap:10,boxShadow:"0 1px 3px rgba(0,0,0,0.1)"}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
-          <div style={{width:24,height:24,borderRadius:6,background:"var(--accent)",
+          <div style={{width:26,height:26,borderRadius:7,background:"var(--accent)",
             display:"flex",alignItems:"center",justifyContent:"center",
-            fontSize:11,fontWeight:800,color:"#080a0e",flexShrink:0}}>K</div>
-          <span style={{fontSize:13,fontWeight:700,letterSpacing:"-0.01em"}}>Kronos</span>
-          <span style={{fontSize:11,color:"var(--muted)",marginLeft:2}}>{state.settings.semester}</span>
+            fontSize:12,fontWeight:800,color:"#fff",flexShrink:0}}>K</div>
+          <span style={{fontSize:14,fontWeight:700,letterSpacing:"-0.01em"}}>Kronos</span>
+          <span style={{fontSize:12,color:"var(--muted)",marginLeft:2}}>{state.settings.semester}</span>
         </div>
         <div style={{flex:1}}/>
+        {/* Cloud save indicator */}
+        {user&&(
+          <div style={{fontSize:11,color:"var(--muted)",display:"flex",alignItems:"center",gap:4}}>
+            {cloudSaving
+              ? <><span style={{width:6,height:6,borderRadius:"50%",background:"var(--warn)",animation:"pulse 0.8s infinite",display:"inline-block"}}/>Saving…</>
+              : lastCloudSave
+                ? <><span style={{width:6,height:6,borderRadius:"50%",background:"var(--accent)",display:"inline-block"}}/>Saved</>
+                : null
+            }
+          </div>
+        )}
         {conflictCount>0&&(
           <div onClick={()=>setTab("conflicts")}
             style={{display:"flex",alignItems:"center",gap:5,cursor:"pointer",
@@ -3498,11 +3648,27 @@ export default function TimetableBuilder() {
           </Btn>
         ):(
           <div style={{display:"flex",alignItems:"center",gap:5,padding:"3px 10px",borderRadius:99,
-            background:"rgba(110,231,183,0.1)",border:"1px solid rgba(110,231,183,0.25)"}}>
+            background:"rgba(5,150,105,0.08)",border:"1px solid rgba(110,231,183,0.25)"}}>
             <span style={{width:5,height:5,borderRadius:"50%",background:"var(--accent)",animation:"pulse 2s infinite"}}/>
             <span style={{fontSize:10,color:"var(--accent)",fontWeight:600,fontFamily:"var(--mono)",
               letterSpacing:"0.08em"}}>{collab.session.roomCode}</span>
           </div>
+        )}
+        {/* User avatar */}
+        {user ? (
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            {user.photoURL
+              ? <img src={user.photoURL} alt="" style={{width:28,height:28,borderRadius:"50%",border:"2px solid var(--border2)"}}/>
+              : <div style={{width:28,height:28,borderRadius:"50%",background:"var(--bg4)",
+                  border:"1px solid var(--border2)",display:"flex",alignItems:"center",
+                  justifyContent:"center",fontSize:11,fontWeight:600,color:"var(--muted)"}}>
+                  {initials(user.displayName||user.email||"?")}
+                </div>
+            }
+            <Btn variant="ghost" size="xs" onClick={()=>signOutUser()} title="Sign out">Sign out</Btn>
+          </div>
+        ) : (
+          <Btn variant="outline" size="xs" onClick={()=>signInWithGoogle()}>Sign in</Btn>
         )}
         <Btn variant="accent" onClick={()=>setModal({weekNum:1,dayIdx:0,timeId:state.slots[0]?.id})}>
           + Schedule
@@ -3522,10 +3688,10 @@ export default function TimetableBuilder() {
       )}
 
       {/* Main layout */}
-      <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+      <div style={{flex:1,display:"flex",overflow:"hidden",minHeight:0}}>
         {/* Icon nav */}
         <nav style={{width:52,background:"var(--bg2)",borderRight:"1px solid var(--border)",
-          display:"flex",flexDirection:"column",alignItems:"center",padding:"8px 0",gap:2,flexShrink:0}}>
+          display:"flex",flexDirection:"column",alignItems:"center",padding:"8px 0",gap:2,flexShrink:0,boxShadow:"1px 0 0 var(--border)"}}>
           {TABS_WITH_ACTIVITY.map(t=>{
             const active=tab===t.id;
             const isCon=t.id==="conflicts"&&conflictCount>0;
@@ -3565,7 +3731,7 @@ export default function TimetableBuilder() {
         </div>
 
         {/* Content */}
-        <main style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column",minHeight:0}}>
+        <main style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column",minHeight:0,position:"relative"}}>
           {tab==="schedule"&&<ScheduleTab state={state} onApptClick={handleApptClick} onCellClick={handleCellClick} conflicts={conflicts}/>}
           {tab==="dashboard"&&<DashboardTab state={state} conflicts={conflicts}/>}
           {tab==="autoschedule"&&<AutoScheduleTab state={state} setState={setState} toast={toast.push}/>}
