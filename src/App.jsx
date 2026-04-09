@@ -1180,15 +1180,15 @@ function CSVImportModal({state,setState,toast,onClose}) {
   const [preview,setPreview]=useState(null); // {rows,headers,parsed}
   const [error,setError]=useState("");
   const [mapping,setMapping]=useState({
-    courseName:"",courseCode:"",instructor:"",group:"",category:"",credits:""
+    courseName:"",courseCode:"",instructor:"",group:"",category:"",credits:""  // group col accepts "CS-1A | CS-1B"
   });
   const [parseResult,setParseResult]=useState(null);
 
   const TEMPLATE_CSV=[
-    "Course Name,Course Code,Instructor,Student Group,Category,Credits",
+    "Course Name,Course Code,Instructor,Student Groups,Category,Credits",
     "Intro to Python,CS101,Dr. Alice Chen,CS-1A,Core,3",
-    "Data Structures,CS201,Prof. Ben Okafor,CS-2A,Core,3",
-    "Machine Learning,CS401,Prof. James Wright,Year 1,Elective,4",
+    "Data Structures,CS201,Prof. Ben Okafor,CS-2A | CS-2B,Core,3",
+    "Machine Learning,CS401,Prof. James Wright,Year 1 | Year 2,Elective,4",
     "Physics Lab,PH101,Dr. Sara Lim,CS-1B,Lab,2"
   ].join("\n");
 
@@ -1262,7 +1262,9 @@ function CSVImportModal({state,setState,toast,onClose}) {
       const courseName=get(row,mapping.courseName).trim();
       const courseCode=get(row,mapping.courseCode).trim();
       const instructorName=get(row,mapping.instructor).trim();
-      const groupName=get(row,mapping.group).trim();
+      // Support multiple groups separated by pipe | or semicolon ;
+      const groupRaw=get(row,mapping.group);
+      const groupNames=groupRaw.split(/[|;]/).map(g=>g.trim()).filter(Boolean);
       const category=get(row,mapping.category).trim()||"Core";
       const credits=parseInt(get(row,mapping.credits))||3;
       if(!courseName) return;
@@ -1279,21 +1281,21 @@ function CSVImportModal({state,setState,toast,onClose}) {
         instrId=instr.id;
       }
 
-      // Find or create group
-      let groupId="";
-      if(groupName){
+      // Find or create each group (supports multiple)
+      const groupIds=[];
+      groupNames.forEach(groupName=>{
         let grp=newGroups.find(g=>g.name.toLowerCase()===groupName.toLowerCase());
         if(!grp){
           grp={id:uid(),name:groupName,parentId:null,size:30};
           newGroups.push(grp);
           addedGroups++;
         }
-        groupId=grp.id;
-      }
+        groupIds.push(grp.id);
+      });
 
       // Find or create course
       let course=newCourses.find(c=>
-        c.code.toLowerCase()===courseCode.toLowerCase()||
+        (courseCode&&c.code.toLowerCase()===courseCode.toLowerCase())||
         c.name.toLowerCase()===courseName.toLowerCase()
       );
       if(!course){
@@ -1301,7 +1303,7 @@ function CSVImportModal({state,setState,toast,onClose}) {
           id:uid(),name:courseName,code:courseCode||courseName.slice(0,6).toUpperCase(),
           colorId:COLORS[colorIdx%COLORS.length],
           defaultInstructorId:instrId,
-          defaultGroupIds:groupId?[groupId]:[],
+          defaultGroupIds:groupIds,
           category:CATEGORIES.includes(category)?category:"Core",
           credits,
         };
@@ -1309,10 +1311,12 @@ function CSVImportModal({state,setState,toast,onClose}) {
         colorIdx++;
         addedCourses++;
       } else {
-        // Update defaults if new info
+        // Merge new info into existing course
         if(instrId&&!course.defaultInstructorId) course.defaultInstructorId=instrId;
-        if(groupId&&!(course.defaultGroupIds||[]).includes(groupId))
-          course.defaultGroupIds=[...course.defaultGroupIds,groupId];
+        groupIds.forEach(gid=>{
+          if(!(course.defaultGroupIds||[]).includes(gid))
+            course.defaultGroupIds=[...(course.defaultGroupIds||[]),gid];
+        });
       }
     });
 
@@ -1333,13 +1337,21 @@ function CSVImportModal({state,setState,toast,onClose}) {
               <div style={{fontSize:28,marginBottom:8}}>📄</div>
               <div style={{fontSize:13,fontWeight:500,marginBottom:4}}>Drop your CSV file here or click to browse</div>
               <div style={{fontSize:11,color:"var(--muted)",marginBottom:14}}>
-                Columns: Course Name, Course Code, Instructor, Student Group, Category, Credits
+                Columns: Course Name, Course Code, Instructor, Student Groups, Category, Credits
+                <br/><span style={{fontSize:10,color:"var(--muted2)"}}>Tip: separate multiple groups with a pipe character e.g. <strong>CS-1A | CS-1B</strong></span>
               </div>
-              <input type="file" accept=".csv,.txt" onChange={e=>e.target.files[0]&&handleFile(e.target.files[0])}
-                style={{display:"none"}} id="csv-upload"/>
-              <div style={{display:"flex",gap:8,justifyContent:"center"}}>
-                <label htmlFor="csv-upload">
-                  <Btn variant="accent" as="span">Browse File</Btn>
+              <div style={{display:"flex",gap:8,justifyContent:"center",alignItems:"center"}}>
+                <label style={{display:"inline-block",cursor:"pointer"}}>
+                  <input type="file" accept=".csv,.txt"
+                    onChange={e=>e.target.files[0]&&handleFile(e.target.files[0])}
+                    style={{display:"none"}}/>
+                  <span style={{display:"inline-flex",alignItems:"center",gap:6,
+                    background:"rgba(5,150,105,0.15)",color:"var(--accent)",
+                    border:"1px solid rgba(5,150,105,0.3)",borderRadius:"var(--r)",
+                    padding:"5px 10px",fontSize:11,fontWeight:500,cursor:"pointer",
+                    fontFamily:"'Outfit',sans-serif"}}>
+                    Browse File
+                  </span>
                 </label>
                 <Btn variant="outline" onClick={downloadTemplate}>↓ Download Template</Btn>
               </div>
@@ -1351,9 +1363,9 @@ function CSVImportModal({state,setState,toast,onClose}) {
                 letterSpacing:"0.08em",marginBottom:8}}>Expected Format</div>
               <pre style={{fontSize:10,fontFamily:"var(--mono)",color:"var(--muted)",
                 overflowX:"auto",lineHeight:1.6}}>
-{`Course Name,Course Code,Instructor,Student Group,Category,Credits
+{`Course Name,Course Code,Instructor,Student Groups,Category,Credits
 Intro to Python,CS101,Dr. Alice Chen,CS-1A,Core,3
-Data Structures,CS201,Prof. Ben Okafor,CS-2A,Core,3`}
+Machine Learning,CS401,Prof. James Wright,Year 1 | Year 2,Elective,4`}
               </pre>
             </div>
           </>
@@ -1370,7 +1382,7 @@ Data Structures,CS201,Prof. Ben Okafor,CS-2A,Core,3`}
                   ["courseName","Course Name *"],
                   ["courseCode","Course Code"],
                   ["instructor","Instructor"],
-                  ["group","Student Group"],
+                  ["group","Student Groups (pipe-separated)"],
                   ["category","Category"],
                   ["credits","Credits"],
                 ].map(([key,label])=>(
