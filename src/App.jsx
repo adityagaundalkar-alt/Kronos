@@ -151,6 +151,41 @@ function seed() {
   };
 }
 
+
+// ── Sanitize appointment loaded from Firebase (strips undefined array fields) ──
+function sanitizeAppt(a) {
+  if(!a) return a;
+  return {
+    ...a,
+    groupIds:   Array.isArray(a.groupIds)   ? a.groupIds   : [],
+    notes:      a.notes      || "",
+    section:    a.section    || "",
+    courseCode: a.courseCode || "",
+    courseName: a.courseName || "",
+    instructorId: a.instructorId || "",
+    roomId:     a.roomId     || "",
+  };
+}
+function sanitizeState(s) {
+  if(!s) return s;
+  const appointments = {};
+  Object.entries(s.appointments||{}).forEach(([k,v])=>{
+    appointments[k] = sanitizeAppt(v);
+  });
+  return {
+    ...s,
+    appointments,
+    instructors: (s.instructors||[]).map(i=>({...i,availability:i.availability||{}})),
+    courses:     (s.courses||[]).map(c=>({...c,defaultGroupIds:Array.isArray(c.defaultGroupIds)?c.defaultGroupIds:[]})),
+    groups:      s.groups     || [],
+    rooms:       s.rooms      || [],
+    holidays:    s.holidays   || [],
+    changelog:   s.changelog  || [],
+    slots:       s.slots      || [{id:"am",label:"09:00 – 12:00",short:"Morning"},{id:"pm",label:"13:00 – 16:00",short:"Afternoon"},{id:"ev",label:"17:00 – 20:00",short:"Evening"}],
+    settings:    s.settings   || {institution:"",semester:"",logo:""},
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  CONFLICT ENGINE
 // ═══════════════════════════════════════════════════════════════════
@@ -162,7 +197,7 @@ function checkConflicts(appointments,appt,wn,di,ti,excludeId=null) {
       out.push({type:"instructor",label:"Instructor double-booked",clash:a.courseName||a.courseCode});
     if(appt.roomId&&a.roomId===appt.roomId)
       out.push({type:"room",label:"Room already occupied",clash:a.courseName||a.courseCode});
-    const grpClash=(appt.groupIds||[]).filter(g=>(a.groupIds||[]).includes(g));
+    const grpClash=(appt.groupIds||[]).filter(g=>(a.groupIds||[]).includes(g))||[];
     if(grpClash.length)
       out.push({type:"group",label:"Student group clash",clash:a.courseName||a.courseCode});
   });
@@ -178,7 +213,7 @@ function getAllConflicts(appointments) {
         all.push({type:"instructor",a,b,label:"Instructor double-booked"});
       if(a.roomId&&a.roomId===b.roomId)
         all.push({type:"room",a,b,label:"Room double-booked"});
-      const g=(a.groupIds||[]).filter(x=>(b.groupIds||[]).includes(x));
+      const g=(a.groupIds||[]).filter(x=>(b.groupIds||[]).includes(x))||[];
       if(g.length) all.push({type:"group",a,b,label:"Student group clash"});
     });
   });
@@ -870,7 +905,7 @@ function ScheduleTab({state,onApptClick,onCellClick,conflicts}) {
   const filteredAppts=useMemo(()=>{
     return Object.values(appointments).filter(a=>{
       if(a.weekNum!==selWeek) return false;
-      if(filterGroup&&!a.groupIds?.includes(filterGroup)) return false;
+      if(filterGroup&&!(a.groupIds||[]).includes(filterGroup)) return false;
       return true;
     });
   },[appointments,selWeek,filterGroup]);
@@ -2235,7 +2270,7 @@ function areGroupsFreeAllWeeks(appointments, groupIds, dayIdx, timeId, weeks) {
   return weeks.every(wn =>
     !Object.values(appointments).some(a =>
       a.weekNum===wn && a.dayIdx===dayIdx && a.timeId===timeId &&
-      (a.groupIds||[]).some(g => groupIds.includes(g))
+      (a.groupIds||[]).some(g => (groupIds||[]).includes(g))
     )
   );
 }
@@ -3096,7 +3131,7 @@ function useCollaboration(localState, setLocalState, toast) {
         const rh=hashState(remote);
         if(rh!==lastHashRef.current) {
           lastHashRef.current=rh;
-          setLocalState(prev=>{ const merged={...remote,appointments:{...prev.appointments,...remote.appointments}}; saveLocal(merged); return merged; });
+          setLocalState(prev=>{ const merged=sanitizeState({...remote,appointments:{...prev.appointments,...remote.appointments}}); saveLocal(merged); return merged; });
           setLastSyncAt(Date.now());
           toast("Schedule updated by collaborator","info");
         }
@@ -3485,7 +3520,7 @@ function LoginScreen({ onSkip }) {
 export default function TimetableBuilder() {
   const { user, loading: authLoading } = useAuth();
   const [skipAuth, setSkipAuth]         = useState(false);
-  const [state,    setStateRaw]         = useState(()=>loadLocal()||seed());
+  const [state,    setStateRaw]         = useState(()=>sanitizeState(loadLocal())||seed());
   const [tab,      setTab]              = useState("schedule");
   const [modal,    setModal]            = useState(null);
   const [showCollab,setShowCollab]      = useState(false);
@@ -3504,8 +3539,9 @@ export default function TimetableBuilder() {
       const remote = await loadUserState(user.uid);
       if(remote) {
         const { _savedAt, ...appState } = remote;
-        setStateRaw(appState);
-        saveLocal(appState);
+        const clean = sanitizeState(appState);
+        setStateRaw(clean);
+        saveLocal(clean);
         toast.push("Timetable loaded from cloud ✓","ok");
       }
     })();
