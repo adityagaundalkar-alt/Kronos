@@ -191,13 +191,15 @@ function sanitizeState(s) {
 // ═══════════════════════════════════════════════════════════════════
 function checkConflicts(appointments,appt,wn,di,ti,excludeId=null) {
   const out=[];
-  Object.values(appointments).forEach(a=>{
+  const safeAppt={...appt,groupIds:Array.isArray(appt.groupIds)?appt.groupIds:[]};
+  Object.values(appointments).forEach(raw=>{
+    const a={...raw,groupIds:Array.isArray(raw.groupIds)?raw.groupIds:[],instructorId:raw.instructorId||"",roomId:raw.roomId||""};
     if(a.weekNum!==wn||a.dayIdx!==di||a.timeId!==ti||a.id===excludeId) return;
-    if(appt.instructorId&&a.instructorId===appt.instructorId)
+    if(safeAppt.instructorId&&a.instructorId===safeAppt.instructorId)
       out.push({type:"instructor",label:"Instructor double-booked",clash:a.courseName||a.courseCode});
-    if(appt.roomId&&a.roomId===appt.roomId)
+    if(safeAppt.roomId&&a.roomId===safeAppt.roomId)
       out.push({type:"room",label:"Room already occupied",clash:a.courseName||a.courseCode});
-    const grpClash=(appt.groupIds||[]).filter(g=>(a.groupIds||[]).includes(g))||[];
+    const grpClash=safeAppt.groupIds.filter(g=>a.groupIds.includes(g));
     if(grpClash.length)
       out.push({type:"group",label:"Student group clash",clash:a.courseName||a.courseCode});
   });
@@ -205,7 +207,13 @@ function checkConflicts(appointments,appt,wn,di,ti,excludeId=null) {
 }
 function getAllConflicts(appointments) {
   const all=[];
-  const list=Object.values(appointments);
+  // Always sanitize here — Firebase may strip empty arrays on any path
+  const list=Object.values(appointments).map(a=>({
+    ...a,
+    groupIds:Array.isArray(a.groupIds)?a.groupIds:[],
+    instructorId:a.instructorId||"",
+    roomId:a.roomId||"",
+  }));
   list.forEach((a,i)=>{
     list.slice(i+1).forEach(b=>{
       if(a.weekNum!==b.weekNum||a.dayIdx!==b.dayIdx||a.timeId!==b.timeId) return;
@@ -213,7 +221,7 @@ function getAllConflicts(appointments) {
         all.push({type:"instructor",a,b,label:"Instructor double-booked"});
       if(a.roomId&&a.roomId===b.roomId)
         all.push({type:"room",a,b,label:"Room double-booked"});
-      const g=(a.groupIds||[]).filter(x=>(b.groupIds||[]).includes(x))||[];
+      const g=a.groupIds.filter(x=>b.groupIds.includes(x));
       if(g.length) all.push({type:"group",a,b,label:"Student group clash"});
     });
   });
@@ -475,7 +483,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
     if(!c) return;
     setForm(f=>({...f,
       instructorId:f.instructorId||c.defaultInstructorId||"",
-      groupIds:f.groupIds.length?f.groupIds:c.defaultGroupIds||[],
+      groupIds:(Array.isArray(f.groupIds)&&f.groupIds.length)?f.groupIds:(c.defaultGroupIds||[]),
     }));
   },[form.courseId]);
 
@@ -1299,7 +1307,7 @@ function CSVImportModal({state,setState,toast,onClose}) {
       } else {
         // Update defaults if new info
         if(instrId&&!course.defaultInstructorId) course.defaultInstructorId=instrId;
-        if(groupId&&!course.defaultGroupIds.includes(groupId))
+        if(groupId&&!(course.defaultGroupIds||[]).includes(groupId))
           course.defaultGroupIds=[...course.defaultGroupIds,groupId];
       }
     });
@@ -2313,7 +2321,7 @@ function runAutoSchedule(state, jobs) {
       const instrFree = !instructorId || isInstructorFreeAllWeeks(working, instructorId, dayIdx, timeId, weeks);
       if (!instrFree) continue;
       // Check all groups free across ALL weeks
-      const grpFree = !groupIds.length || areGroupsFreeAllWeeks(working, groupIds, dayIdx, timeId, weeks);
+      const grpFree = !(groupIds||[]).length || areGroupsFreeAllWeeks(working, groupIds, dayIdx, timeId, weeks);
       if (!grpFree) continue;
 
       // Find room for each week (may differ if roomId not locked)
@@ -2562,7 +2570,7 @@ function AutoScheduleTab({ state, setState, toast }) {
     const weeks=getJobWeeks(job);
     const slts=getJobSlots(job);
     const instr=instructors.find(i=>i.id===job.instructorId);
-    const grps=job.groupIds;
+    const grps=job.groupIds||[];
     return slts.filter(({dayIdx,timeId})=>{
       const instrOk=!instr||isInstructorFreeAllWeeks(appointments,instr.id,dayIdx,timeId,weeks);
       const grpOk=!grps.length||areGroupsFreeAllWeeks(appointments,grps,dayIdx,timeId,weeks);
@@ -2651,7 +2659,7 @@ function AutoScheduleTab({ state, setState, toast }) {
         {preview.map(({job,course,instr,weeks,slots_},i)=>{
           if(!course) return null;
           const pal=PALETTE.find(p=>p.id===course.colorId)||PALETTE[0];
-          const grpNames=job.groupIds.map(g=>groups.find(x=>x.id===g)?.name).filter(Boolean);
+          const grpNames=(job.groupIds||[]).map(g=>groups.find(x=>x.id===g)?.name).filter(Boolean);
           const feasible=countFeasible(job);
           return (
             <div key={job.id} style={{background:"var(--bg2)",border:`1px solid ${pal.border}`,
@@ -2849,7 +2857,7 @@ function JobCard({ job, ji, courses, instructors, groups, rooms, slots, state, o
     DAYS.forEach((_,di)=>{
       slots.forEach(s=>{
         const instrOk=!instr||isInstructorFreeAllWeeks(appointments,instr.id,di,s.id,weeks_);
-        const grpOk=!job.groupIds.length||areGroupsFreeAllWeeks(appointments,job.groupIds,di,s.id,weeks_);
+        const grpOk=!(job.groupIds||[]).length||areGroupsFreeAllWeeks(appointments,job.groupIds,di,s.id,weeks_);
         m[`${di}_${s.id}`]={instrOk,grpOk,free:instrOk&&grpOk};
       });
     });
@@ -3572,7 +3580,7 @@ export default function TimetableBuilder() {
     });
   },[collab.session,collab.pushState,user]);
 
-  const conflicts=useMemo(()=>getAllConflicts(state.appointments),[state.appointments]);
+  const conflicts=useMemo(()=>getAllConflicts(state.appointments||{}),[state.appointments]);
 
   function log(action,detail="") {
     setStateRaw(prev=>{
