@@ -207,12 +207,16 @@ function checkConflicts(appointments,appt,wn,di,ti,excludeId=null) {
 }
 function getAllConflicts(appointments) {
   const all=[];
+  if(!appointments||typeof appointments!=="object") return all;
   // Always sanitize here — Firebase may strip empty arrays on any path
-  const list=Object.values(appointments).map(a=>({
+  const list=Object.values(appointments).filter(Boolean).map(a=>({
     ...a,
     groupIds:Array.isArray(a.groupIds)?a.groupIds:[],
     instructorId:a.instructorId||"",
     roomId:a.roomId||"",
+    weekNum:a.weekNum??0,
+    dayIdx:a.dayIdx??0,
+    timeId:a.timeId||"",
   }));
   list.forEach((a,i)=>{
     list.slice(i+1).forEach(b=>{
@@ -642,7 +646,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
 // ═══════════════════════════════════════════════════════════════════
 function ApptChip({appt,courses,instructors,rooms,onClick,conflicts=[]}) {
   const pal=getPalette(appt.courseId,courses);
-  const hasConflict=conflicts.some(c=>c.a.id===appt.id||c.b.id===appt.id);
+  const hasConflict=(conflicts||[]).some(c=>c&&c.a&&c.b&&(c.a.id===appt.id||c.b.id===appt.id));
   const instr=instructors.find(x=>x.id===appt.instructorId);
   const room=rooms.find(x=>x.id===appt.roomId);
   return (
@@ -3098,10 +3102,10 @@ function useCollaboration(localState, setLocalState, toast) {
     if (!isOwner) {
       setSyncing(true);
       const remote = await colLoad(code);
-      if (remote) { setLocalState(remote); saveLocal(remote); lastHashRef.current=hashState(remote); }
+      if (remote) { const clean=sanitizeState(remote); setLocalState(clean); saveLocal(clean); lastHashRef.current=hashState(clean); }
       setSyncing(false);
     } else {
-      await colSave(code, localState); lastHashRef.current=hashState(localState);
+      const safeLocalState=sanitizeState(localState)||localState; await colSave(code, safeLocalState); lastHashRef.current=hashState(safeLocalState);
     }
     await _updatePresence(sess, "schedule");
     _startPolling(sess);
@@ -3139,7 +3143,7 @@ function useCollaboration(localState, setLocalState, toast) {
         const rh=hashState(remote);
         if(rh!==lastHashRef.current) {
           lastHashRef.current=rh;
-          setLocalState(prev=>{ const merged=sanitizeState({...remote,appointments:{...prev.appointments,...remote.appointments}}); saveLocal(merged); return merged; });
+          setLocalState(prev=>{ const raw={...remote,appointments:{...(prev.appointments||{}),...(remote.appointments||{})}}; const merged=sanitizeState(raw); saveLocal(merged); return merged; });
           setLastSyncAt(Date.now());
           toast("Schedule updated by collaborator","info");
         }
@@ -3557,7 +3561,7 @@ export default function TimetableBuilder() {
 
   // ── Wrap setState to also push to collab room ─────────────────────
   const collab=useCollaboration(state,
-    (newState)=>setStateRaw(typeof newState==="function"?newState:prev=>newState),
+    (newState)=>setStateRaw(typeof newState==="function"?(prev=>sanitizeState(newState(prev))||newState(prev)):sanitizeState(newState)||newState),
     toast.push
   );
 
