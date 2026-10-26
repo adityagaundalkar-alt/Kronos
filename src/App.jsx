@@ -1,445 +1,27 @@
-import { useState, useEffect, useCallback, useRef, useMemo, createContext, useContext } from "react";
-import {
-  auth,
-  signInWithGoogle, explainAuthError, signOutUser, onAuthChange, ensureAuth,
-  loadUserState, saveUserState,
-  registerRoom, roomExists, loadRoom, writeRoomTree, updateRoom, subscribeRoom,
-  pushOp, subscribeOps, subscribePresence, joinPresence,
-} from "./firebase.js";
-import { iso, parseISO, addDays, mondayOf, fmt, fmtLong, getWeekStart, slotDate } from "./dates.js";
+import { useState, useEffect, useCallback, useRef, useMemo, useContext } from "react";
+import { signInWithGoogle, explainAuthError, signOutUser, ensureAuth, loadUserState, saveUserState, onAuthChange } from "./firebase.js";
+import { iso, parseISO, addDays, fmt, fmtLong, getWeekStart, slotDate } from "./dates.js";
 import { same } from "./sync.js";
-import { createRoomClient } from "./roomClient.js";
-import { checkConflicts, getAllConflicts, isInstructorFreeAllWeeks, areGroupsFreeAllWeeks, isRoomFree } from "./conflicts.js";
+import { checkConflicts, getAllConflicts } from "./conflicts.js";
 import { slotRange, customLabel, timeLabel, startKey, validateCustomTimes, fromMinutes } from "./timeslots.js";
-
-// ═══════════════════════════════════════════════════════════════════
-//  CONSTANTS
-// ═══════════════════════════════════════════════════════════════════
-const DAYS      = ["Mon","Tue","Wed","Thu","Fri"];
-const DAYS_FULL = ["Monday","Tuesday","Wednesday","Thursday","Friday"];
-const WEEKS     = [
-  { n:0,  label:"Orientation", short:"ORI" },
-  ...Array.from({length:16},(_,i)=>({ n:i+1, label:`Week ${i+1}`, short:`W${i+1}` })),
-];
-const DEFAULT_SLOTS = [
-  { id:"am", label:"09:00 – 12:00", short:"Morning"   },
-  { id:"pm", label:"13:00 – 16:00", short:"Afternoon" },
-  { id:"ev", label:"17:00 – 20:00", short:"Evening"   },
-];
-const PALETTE = [
-  { id:"sky",     accent:"#0284c7", bg:"rgba(2,132,199,0.10)",   border:"rgba(2,132,199,0.35)"   },
-  { id:"emerald", accent:"#059669", bg:"rgba(5,150,105,0.10)",   border:"rgba(5,150,105,0.35)"   },
-  { id:"rose",    accent:"#e11d48", bg:"rgba(225,29,72,0.08)",   border:"rgba(225,29,72,0.30)"   },
-  { id:"violet",  accent:"#7c3aed", bg:"rgba(124,58,237,0.09)",  border:"rgba(124,58,237,0.30)"  },
-  { id:"amber",   accent:"#b45309", bg:"rgba(180,83,9,0.09)",    border:"rgba(180,83,9,0.30)"    },
-  { id:"orange",  accent:"#c2410c", bg:"rgba(194,65,12,0.09)",   border:"rgba(194,65,12,0.30)"   },
-  { id:"lime",    accent:"#4d7c0f", bg:"rgba(77,124,15,0.09)",   border:"rgba(77,124,15,0.30)"   },
-  { id:"pink",    accent:"#be185d", bg:"rgba(190,24,93,0.08)",   border:"rgba(190,24,93,0.28)"   },
-  { id:"cyan",    accent:"#0e7490", bg:"rgba(14,116,144,0.09)",  border:"rgba(14,116,144,0.30)"  },
-  { id:"slate",   accent:"#475569", bg:"rgba(71,85,105,0.08)",   border:"rgba(71,85,105,0.25)"   },
-];
-const ROOM_TYPES    = ["lecture","seminar","lab","studio","online"];
-const CATEGORIES    = ["Core","Elective","Lab","Workshop","Seminar"];
-const TABS = [
-  { id:"schedule",     icon:"⬛", label:"Schedule"     },
-  { id:"dashboard",   icon:"◈",  label:"Dashboard"    },
-  { id:"autoschedule",icon:"⚡",  label:"Auto-Schedule"},
-  { id:"courses",     icon:"◉",  label:"Courses"      },
-  { id:"assets",      icon:"⬡",  label:"Assets"       },
-  { id:"instructor",  icon:"◎",  label:"By Instructor"},
-  { id:"conflicts",   icon:"△",  label:"Conflicts"    },
-  { id:"changelog",   icon:"≡",  label:"Changelog"    },
-  { id:"settings",    icon:"⚙",  label:"Settings"     },
-];
-
-// ═══════════════════════════════════════════════════════════════════
-//  UTILS
-// ═══════════════════════════════════════════════════════════════════
-const uid      = () => Math.random().toString(36).slice(2,9);
-// Date helpers (iso, addDays, fmt, getWeekStart, slotDate, ...) live in ./dates.js
-function getPalette(courseId,courses) {
-  const c=courses?.find(x=>x.id===courseId);
-  return PALETTE.find(p=>p.id===c?.colorId)||PALETTE[0];
-}
-function initials(name) {
-  return name.split(" ").filter(Boolean).slice(0,2).map(w=>w[0]).join("").toUpperCase();
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  LOCAL STORAGE (solo fallback)
-// ═══════════════════════════════════════════════════════════════════
-const LOCAL_KEY = "kronos_v5";
-const loadLocal = () => { try{ const s=localStorage.getItem(LOCAL_KEY); return s?JSON.parse(s):null; }catch{ return null; } };
-const saveLocal = s  => { try{ localStorage.setItem(LOCAL_KEY,JSON.stringify(s)); }catch{} };
-
-// ═══════════════════════════════════════════════════════════════════
-//  COLLABORATION LAYER═══
-const USER_COLORS = ["#059669","#0284c7","#be185d","#7c3aed","#b45309","#c2410c","#0e7490","#e11d48"];
-const userColor   = (idx) => USER_COLORS[idx % USER_COLORS.length];
-
-// Collab backend functions are imported from ./firebase.js.
-// Room codes are the only thing protecting a room, so they come from the
-// crypto RNG and are 8 characters (32^8 ≈ 1.1e12). Older 6-character codes still work.
-const CODE_CHARS="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-function genRoomCode(len=8) {
-  const buf=new Uint32Array(len);
-  crypto.getRandomValues(buf);
-  return Array.from(buf,n=>CODE_CHARS[n%CODE_CHARS.length]).join("");
-}
-const isValidRoomCode = c => /^[A-Z0-9]{6,8}$/.test(c);
-
-// Rooms this browser has joined before (stored locally, never listed from the server)
-const RECENT_ROOMS_KEY="kronos_recent_rooms";
-function loadRecentRooms() {
-  try { const r=JSON.parse(localStorage.getItem(RECENT_ROOMS_KEY)||"[]"); return Array.isArray(r)?r:[]; } catch { return []; }
-}
-function rememberRoom(code,name) {
-  try {
-    const all=loadRecentRooms(), prev=all.find(r=>r.code===code);
-    const rest=all.filter(r=>r.code!==code);
-    localStorage.setItem(RECENT_ROOMS_KEY,JSON.stringify([{code,name:name||prev?.name||"",at:Date.now()},...rest].slice(0,5)));
-  } catch {}
-}
-
-// Who else is in the room and which session each person has open
-const PresenceCtx=createContext({editing:{}});
-
-
-// ═══════════════════════════════════════════════════════════════════
-//  SEED DATA
-// ═══════════════════════════════════════════════════════════════════
-function seed() {
-  const w1=iso(mondayOf(new Date()));
-  const iA=uid(),iB=uid(),iC=uid(),iD=uid();
-  const r1=uid(),r2=uid(),r3=uid(),r4=uid();
-  const g1=uid(),g2=uid(),g3=uid(),g4=uid(),g5=uid();
-  const c1=uid(),c2=uid(),c3=uid(),c4=uid();
-  const instructors=[
-    {id:iA,name:"Dr. Alice Chen",    email:"a.chen@uni.edu",   dept:"Computer Science", maxLoad:8,  available:true,  colorId:"sky",
-      availability:{0:["am","pm"],1:["am"],2:["am","pm"],3:["pm"],4:["am"]}},
-    {id:iB,name:"Prof. Ben Okafor",  email:"b.okafor@uni.edu", dept:"Mathematics",      maxLoad:6,  available:true,  colorId:"emerald",
-      availability:{0:["pm"],1:["am","pm"],2:["pm"],3:["am","pm"],4:[]}},
-    {id:iC,name:"Dr. Sara Lim",      email:"s.lim@uni.edu",    dept:"Physics",           maxLoad:8,  available:false, colorId:"amber",
-      availability:{0:["am"],1:[],2:["am"],3:["am"],4:["am","pm"]}},
-    {id:iD,name:"Prof. James Wright",email:"j.wright@uni.edu", dept:"Computer Science", maxLoad:10, available:true,  colorId:"violet",
-      availability:{0:["am","pm"],1:["am","pm"],2:["am","pm"],3:["am","pm"],4:["am","pm"]}},
-  ];
-  const rooms=[
-    {id:r1,name:"Lecture Hall A", capacity:120, building:"Main",    type:"lecture"},
-    {id:r2,name:"Room 101",       capacity:40,  building:"Main",    type:"seminar"},
-    {id:r3,name:"Lab Alpha",      capacity:24,  building:"Science", type:"lab"},
-    {id:r4,name:"Room 202",       capacity:60,  building:"Main",    type:"seminar"},
-  ];
-  const groups=[
-    {id:g1,name:"Year 1",  parentId:null,  size:80},
-    {id:g2,name:"Year 2",  parentId:null,  size:75},
-    {id:g3,name:"CS-1A",   parentId:g1,    size:40},
-    {id:g4,name:"CS-1B",   parentId:g1,    size:38},
-    {id:g5,name:"CS-2A",   parentId:g2,    size:35},
-  ];
-  const courses=[
-    {id:c1,name:"Intro to Computer Science",code:"CS101",colorId:"sky",    defaultInstructorId:iA,defaultGroupIds:[g3],    category:"Core",    credits:3},
-    {id:c2,name:"Data Structures & Algorithms",code:"CS201",colorId:"emerald",defaultInstructorId:iB,defaultGroupIds:[g5], category:"Core",    credits:3},
-    {id:c3,name:"Machine Learning",         code:"CS401",colorId:"violet", defaultInstructorId:iD,defaultGroupIds:[g1,g2], category:"Elective",credits:4},
-    {id:c4,name:"Physics Lab",              code:"PH101",colorId:"amber",  defaultInstructorId:iC,defaultGroupIds:[g4],    category:"Lab",     credits:2},
-  ];
-  const appointments={};
-  [
-    [1,0,"am",c1,iA,r2,[g3]],[1,2,"pm",c2,iB,r3,[g5]],[1,4,"am",c3,iD,r1,[g1,g2]],
-    [2,1,"am",c1,iA,r2,[g3]],[2,3,"pm",c2,iB,r4,[g5]],[2,0,"pm",c3,iD,r1,[g1]],
-    [3,2,"am",c4,iC,r3,[g4]],[3,0,"am",c1,iA,r2,[g3]],[3,4,"pm",c2,iB,r3,[g5]],
-    [4,1,"pm",c3,iD,r1,[g1,g2]],[5,2,"am",c4,iC,r3,[g4]],[5,0,"pm",c1,iA,r2,[g3]],
-    [6,0,"am",c1,iA,r2,[g3]],[6,3,"pm",c2,iB,r4,[g5]],[7,1,"am",c3,iD,r1,[g1,g2]],
-    [7,4,"pm",c4,iC,r3,[g4]],[8,0,"am",c1,iA,r2,[g3]],[8,2,"pm",c2,iB,r3,[g5]],
-  ].forEach(([wn,di,ti,cid,iid,rid,gids])=>{
-    const course=courses.find(c=>c.id===cid), id=uid();
-    appointments[id]={id,weekNum:wn,dayIdx:di,timeId:ti,courseId:cid,
-      courseName:course?.name,courseCode:course?.code,
-      instructorId:iid,roomId:rid,groupIds:gids,notes:""};
-  });
-  return {
-    week1Start:w1,instructors,rooms,groups,courses,appointments,
-    holidays:[],changelog:[],
-    settings:{institution:"University of Excellence",semester:"Semester 1 – 2026",logo:""},
-    slots:DEFAULT_SLOTS,
-  };
-}
-
-
-// ── Sanitize appointment loaded from Firebase (strips undefined array fields) ──
-function sanitizeAppt(a) {
-  if(!a) return a;
-  return {
-    ...a,
-    groupIds:   Array.isArray(a.groupIds)   ? a.groupIds   : [],
-    notes:      a.notes      || "",
-    section:    a.section    || "",
-    courseCode: a.courseCode || "",
-    courseName: a.courseName || "",
-    instructorId: a.instructorId || "",
-    roomId:     a.roomId     || "",
-  };
-}
-function sanitizeState(s) {
-  if(!s) return s;
-  const appointments = {};
-  Object.entries(s.appointments||{}).forEach(([k,v])=>{
-    appointments[k] = sanitizeAppt(v);
-  });
-  return {
-    ...s,
-    appointments,
-    instructors: (s.instructors||[]).map(i=>({...i,availability:i.availability||{}})),
-    courses:     (s.courses||[]).map(c=>({...c,defaultGroupIds:Array.isArray(c.defaultGroupIds)?c.defaultGroupIds:[]})),
-    groups:      s.groups     || [],
-    rooms:       s.rooms      || [],
-    holidays:    s.holidays   || [],
-    changelog:   s.changelog  || [],
-    slots:       s.slots      || [{id:"am",label:"09:00 – 12:00",short:"Morning"},{id:"pm",label:"13:00 – 16:00",short:"Afternoon"},{id:"ev",label:"17:00 – 20:00",short:"Evening"}],
-    settings:    s.settings   || {institution:"",semester:"",logo:""},
-  };
-}
-
-// Conflict detection lives in ./conflicts.js (time-overlap aware; see ./timeslots.js)
-
-// ═══════════════════════════════════════════════════════════════════
-//  TOAST HOOK
-// ═══════════════════════════════════════════════════════════════════
-function useToasts() {
-  const [list,setList]=useState([]);
-  const push=useCallback((msg,type="ok",ms=3500)=>{
-    const id=uid();
-    setList(t=>[...t,{id,msg,type}]);
-    setTimeout(()=>setList(t=>t.filter(x=>x.id!==id)),ms);
-  },[]);
-  const dismiss=useCallback(id=>setList(t=>t.filter(x=>x.id!==id)),[]);
-  return {list,push,dismiss};
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  GLOBAL CSS
-// ═══════════════════════════════════════════════════════════════════
-const GLOBAL_CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
-
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
-html{font-size:15px;scroll-behavior:smooth;}
-body{background:#f0f2f5;color:#1a1d27;font-family:'Outfit',sans-serif;overflow-x:hidden;}
-:root{
-  --bg:     #f0f2f5;
-  --bg2:    #ffffff;
-  --bg3:    #f7f8fa;
-  --bg4:    #eef0f4;
-  --bg5:    #e4e7ed;
-  --border: rgba(0,0,0,0.08);
-  --border2:rgba(0,0,0,0.14);
-  --text:   #1a1d27;
-  --muted:  #6b7280;
-  --muted2: #9ca3af;
-  --accent: #059669;
-  --accent2:#2563eb;
-  --danger: #dc2626;
-  --warn:   #d97706;
-  --mono:   'JetBrains Mono',monospace;
-  --r:      6px;
-  --r2:     10px;
-  --r3:     14px;
-  --shadow: 0 2px 12px rgba(0,0,0,0.10);
-  --glow:   0 0 0 2px rgba(5,150,105,0.2);
-}
-input,select,textarea{
-  background:#ffffff;color:var(--text);border:1px solid var(--border2);
-  border-radius:var(--r);padding:8px 11px;font-family:inherit;font-size:13px;
-  outline:none;transition:border-color 0.15s;width:100%;
-}
-input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:var(--glow);}
-input[type=checkbox]{width:auto;cursor:pointer;accent-color:var(--accent);}
-input[type=range]{width:auto;padding:0;background:transparent;border:none;}
-button{font-family:inherit;cursor:pointer;border:none;outline:none;transition:all 0.15s;}
-::-webkit-scrollbar{width:6px;height:6px;}
-::-webkit-scrollbar-track{background:transparent;}
-::-webkit-scrollbar-thumb{background:var(--muted2);border-radius:3px;}
-::-webkit-scrollbar-thumb:hover{background:var(--muted);}
-@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
-@keyframes slideIn{from{opacity:0;transform:translateX(16px)}to{opacity:1;transform:none}}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
-@keyframes spin{to{transform:rotate(360deg)}}
-.fade-in{animation:fadeIn 0.2s ease}
-.slide-in{animation:slideIn 0.2s ease}
-html,body,#root{height:100%;overflow:hidden;}
-`;
-
-// ═══════════════════════════════════════════════════════════════════
-//  MINI COMPONENTS
-// ═══════════════════════════════════════════════════════════════════
-
-function Badge({children,color="muted",style={}}) {
-  const colors={
-    muted:{bg:"var(--bg4)",color:"var(--muted)",border:"1px solid var(--border2)"},
-    green:{bg:"rgba(52,211,153,0.12)",color:"#34d399",border:"rgba(52,211,153,0.25)"},
-    red:{bg:"rgba(248,113,113,0.12)",color:"#f87171",border:"rgba(248,113,113,0.25)"},
-    yellow:{bg:"rgba(251,191,36,0.12)",color:"#fbbf24",border:"rgba(251,191,36,0.25)"},
-    blue:{bg:"rgba(59,130,246,0.12)",color:"#60a5fa",border:"rgba(59,130,246,0.25)"},
-    accent:{bg:"rgba(5,150,105,0.10)",color:"var(--accent)",border:"rgba(5,150,105,0.22)"},
-  };
-  const c=colors[color]||colors.muted;
-  return (
-    <span style={{display:"inline-flex",alignItems:"center",gap:3,padding:"2px 7px",
-      borderRadius:99,fontSize:10,fontWeight:600,letterSpacing:"0.05em",
-      background:c.bg,color:c.color,border:`1px solid ${c.border}`,...style}}>
-      {children}
-    </span>
-  );
-}
-
-function Btn({children,onClick,variant="ghost",size="sm",style={},disabled=false,title=""}) {
-  const variants={
-    ghost:{background:"transparent",color:"var(--muted)",border:"1px solid transparent"},
-    outline:{background:"transparent",color:"var(--text)",border:"1px solid var(--border2)"},
-    solid:{background:"var(--bg4)",color:"var(--text)",border:"1px solid var(--border2)"},
-    accent:{background:"rgba(5,150,105,0.12)",color:"var(--accent)",border:"1px solid rgba(110,231,183,0.3)"},
-    danger:{background:"rgba(248,113,113,0.12)",color:"var(--danger)",border:"1px solid rgba(248,113,113,0.25)"},
-    primary:{background:"var(--accent)",color:"#ffffff",border:"none"},
-  };
-  const sizes={xs:{padding:"3px 8px",fontSize:10},sm:{padding:"5px 10px",fontSize:11},md:{padding:"7px 14px",fontSize:12}};
-  const v=variants[variant]||variants.ghost;
-  const s=sizes[size]||sizes.sm;
-  return (
-    <button onClick={onClick} disabled={disabled} title={title}
-      style={{...v,...s,borderRadius:"var(--r)",fontWeight:500,fontFamily:"inherit",
-        opacity:disabled?0.4:1,cursor:disabled?"not-allowed":"pointer",
-        display:"inline-flex",alignItems:"center",gap:5,...style}}
-      onMouseEnter={e=>{if(!disabled){e.currentTarget.style.opacity="0.8";}}}
-      onMouseLeave={e=>{e.currentTarget.style.opacity="1";}}>
-      {children}
-    </button>
-  );
-}
-
-function Modal({title,subtitle,onClose,children,width=520}) {
-  useEffect(()=>{
-    const esc=(e)=>{if(e.key==="Escape") onClose();};
-    document.addEventListener("keydown",esc);
-    return ()=>document.removeEventListener("keydown",esc);
-  },[onClose]);
-  return (
-    <div onClick={e=>{if(e.target===e.currentTarget)onClose();}}
-      style={{position:"fixed",inset:0,background:"rgba(15,20,40,0.55)",zIndex:200,
-        display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-      <div className="fade-in" style={{background:"var(--bg2)",border:"1px solid var(--border2)",
-        borderRadius:"var(--r3)",width:"100%",maxWidth:width,maxHeight:"90vh",
-        display:"flex",flexDirection:"column",overflow:"hidden",boxShadow:"var(--shadow)"}}>
-        <div style={{padding:"16px 20px",borderBottom:"1px solid var(--border)",
-          display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
-          <div>
-            <div style={{fontWeight:600,fontSize:14}}>{title}</div>
-            {subtitle&&<div style={{color:"var(--muted)",fontSize:11,marginTop:2}}>{subtitle}</div>}
-          </div>
-          <Btn onClick={onClose} style={{fontSize:14,padding:"4px 8px"}}>✕</Btn>
-        </div>
-        <div style={{overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",flex:1}}>
-          {children}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Field({label,children,required=false,hint=""}) {
-  return (
-    <div style={{marginBottom:12}}>
-      <label style={{display:"block",fontSize:10,fontWeight:600,color:"var(--muted)",
-        textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:5}}>
-        {label}{required&&<span style={{color:"var(--danger)"}}> *</span>}
-      </label>
-      {children}
-      {hint&&<div style={{fontSize:10,color:"var(--muted2)",marginTop:3}}>{hint}</div>}
-    </div>
-  );
-}
-
-function MultiSelect({options,value=[],onChange,placeholder="Select..."}) {
-  const [open,setOpen]=useState(false);
-  const ref=useRef();
-  useEffect(()=>{
-    const h=(e)=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};
-    document.addEventListener("mousedown",h);
-    return ()=>document.removeEventListener("mousedown",h);
-  },[]);
-  const selected=options.filter(o=>value.includes(o.value));
-  return (
-    <div ref={ref} style={{position:"relative"}}>
-      <div onClick={()=>setOpen(v=>!v)}
-        style={{background:"var(--bg3)",border:`1px solid ${open?"var(--accent)":"var(--border2)"}`,
-          borderRadius:"var(--r)",padding:"6px 10px",cursor:"pointer",minHeight:33,
-          display:"flex",flexWrap:"wrap",gap:4,alignItems:"center",
-          boxShadow:open?"var(--glow)":"none"}}>
-        {selected.length===0&&<span style={{color:"var(--muted)",fontSize:11}}>{placeholder}</span>}
-        {selected.map(o=>(
-          <span key={o.value} style={{display:"inline-flex",alignItems:"center",gap:3,
-            background:"var(--bg5)",border:"1px solid var(--border2)",
-            borderRadius:4,padding:"1px 6px",fontSize:10,color:"var(--text)"}}>
-            {o.label}
-            <span onClick={e=>{e.stopPropagation();onChange(value.filter(v=>v!==o.value));}}
-              style={{cursor:"pointer",color:"var(--muted)",marginLeft:2,fontSize:9}}>✕</span>
-          </span>
-        ))}
-        <span style={{marginLeft:"auto",color:"var(--muted)",fontSize:10}}>{open?"▲":"▼"}</span>
-      </div>
-      {open&&(
-        <div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:50,
-          background:"var(--bg3)",border:"1px solid var(--border2)",borderRadius:"var(--r)",
-          marginTop:2,maxHeight:180,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",boxShadow:"var(--shadow)"}}>
-          {options.map(o=>{
-            const sel=value.includes(o.value);
-            return (
-              <div key={o.value} onClick={()=>onChange(sel?value.filter(v=>v!==o.value):[...value,o.value])}
-                style={{padding:"7px 10px",cursor:"pointer",display:"flex",alignItems:"center",gap:8,
-                  fontSize:11,background:sel?"var(--bg4)":"transparent",
-                  borderBottom:"1px solid var(--border)"}}>
-                <span style={{width:12,height:12,borderRadius:3,border:`1px solid var(--border2)`,
-                  background:sel?"var(--accent)":"transparent",flexShrink:0,
-                  display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,
-                  color:"#080a0e",fontWeight:700}}>{sel?"✓":""}</span>
-                {o.label}
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  TOAST RENDERER
-// ═══════════════════════════════════════════════════════════════════
-function Toasts({list,dismiss}) {
-  const colors={ok:{bg:"#f0fdf4",border:"#86efac",color:"#15803d"},
-    error:{bg:"#fef2f2",border:"#fca5a5",color:"#dc2626"},
-    warn:{bg:"#fffbeb",border:"#fcd34d",color:"#b45309"},
-    info:{bg:"#eff6ff",border:"#93c5fd",color:"#1d4ed8"}};
-  return (
-    <div style={{position:"fixed",bottom:20,right:20,zIndex:999,display:"flex",flexDirection:"column",gap:8}}>
-      {list.map(t=>{
-        const c=colors[t.type]||colors.info;
-        return (
-          <div key={t.id} className="slide-in" onClick={()=>dismiss(t.id)}
-            style={{background:c.bg,border:`1px solid ${c.border}`,color:c.color,
-              padding:"10px 14px",borderRadius:"var(--r2)",fontSize:12,fontWeight:500,
-              cursor:"pointer",minWidth:240,boxShadow:"var(--shadow)"}}>
-            {t.msg}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
+import { DAYS, DAYS_FULL, WEEKS, PALETTE, ROOM_TYPES, CATEGORIES, uid, initials, getPalette, paletteById } from "./constants.js";
+import { seed, sanitizeState, loadLocal, saveLocal, backupLocalState } from "./state.js";
+import { PresenceCtx, CollabCtx } from "./collab/context.js";
+import { Badge, Btn, Modal, Field, MultiSelect, EmptyState, Segmented, Avatar, useMedia, useTheme, useToasts, Toasts } from "./ui/kit.jsx";
+import Icon from "./ui/Icon.jsx";
+import AvailabilityGrid from "./features/AvailabilityGrid.jsx";
+import { CommentsPanel, CommentsTab } from "./features/Comments.jsx";
+import AutoScheduleTab from "./features/AutoSchedule.jsx";
+import { useCollaboration } from "./collab/useCollaboration.js";
+import { CollabModal, ShareModal, RoomBar, AccessLostModal, ActivityFeed, RolePill } from "./collab/CollabUI.jsx";
+import { codeFromSearch, ROLE_LABEL } from "./access.js";
+import { Rail, TabBar, MoreSheet, visibleViews, VIEWS } from "./shell/Shell.jsx";
+import LoginScreen from "./shell/Login.jsx";
 
 // ═══════════════════════════════════════════════════════════════════
 //  APPOINTMENT MODAL
 // ═══════════════════════════════════════════════════════════════════
-function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
+function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,readOnly=false}) {
   const {courses,instructors,rooms,groups,appointments,slots}=state;
   const isEdit=!!appt;
   const [form,setForm]=useState(()=>{
@@ -448,6 +30,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
     return {weekNum:w,dayIdx:d,timeId:t,courseId:"",instructorId:"",roomId:"",groupIds:[],section:"",notes:""};
   });
   const [scheduleAll,setScheduleAll]=useState(false);
+  const [confirmDelete,setConfirmDelete]=useState(false);
   const [overrides,setOverrides]=useState({instructor:false,room:false,group:false});
 
   // Collaboration awareness: who else has this session open, and did it change underneath us?
@@ -509,31 +92,30 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
   }
 
   const selCourse=courses.find(x=>x.id===form.courseId);
-  const pal=selCourse?PALETTE.find(p=>p.id===selCourse.colorId)||PALETTE[0]:null;
+  const pal=selCourse?paletteById(selCourse.colorId):null;
 
   return (
-    <Modal title={isEdit?"Edit Session":"New Session"}
+    <Modal title={readOnly?"Session":isEdit?"Edit session":"New session"}
       subtitle={isEdit?`${appt.courseCode} · ${DAYS_FULL[appt.dayIdx]} ${slots.find(s=>s.id===appt.timeId)?.short||appt.timeId}${customLabel(appt)?" · "+customLabel(appt):""}`:"Schedule a new class session"}
       onClose={onClose} width={520}>
       <div style={{padding:20,display:"flex",flexDirection:"column",gap:0}}>
         {deletedRemotely&&(
-          <div style={{marginBottom:12,padding:"8px 10px",borderRadius:"var(--r)",fontSize:11,
-            background:"rgba(248,113,113,0.12)",border:"1px solid rgba(248,113,113,0.3)",color:"var(--danger)"}}>
-            This session was deleted by a collaborator. Close this window — saving is disabled so it isn't restored by accident.
+          <div className="callout bad" role="alert" style={{marginBottom:12}}>
+            A collaborator deleted this session. Close this window. Saving is turned off so it isn't brought back by accident.
           </div>
         )}
-        {!deletedRemotely&&changedRemotely&&(
-          <div style={{marginBottom:12,padding:"8px 10px",borderRadius:"var(--r)",fontSize:11,
-            background:"rgba(251,191,36,0.12)",border:"1px solid rgba(251,191,36,0.35)",color:"var(--warn)"}}>
+        {!deletedRemotely&&changedRemotely&&!readOnly&&(
+          <div className="callout warn" role="status" style={{marginBottom:12}}>
             A collaborator changed this session while you had it open. Saving will overwrite their change.
           </div>
         )}
-        {otherEditors.length>0&&(
-          <div style={{marginBottom:12,padding:"8px 10px",borderRadius:"var(--r)",fontSize:11,
-            background:"rgba(59,130,246,0.1)",border:"1px solid rgba(59,130,246,0.3)",color:"var(--text)"}}>
+        {otherEditors.length>0&&!readOnly&&(
+          <div className="callout info" role="status" style={{marginBottom:12}}>
             {otherEditors.map(e=>e.name).join(", ")} {otherEditors.length>1?"are":"is"} also editing this session.
           </div>
         )}
+        {readOnly&&<div className="callout info" style={{marginBottom:12}}>You have view-only access, so you can read this session and comment on it.</div>}
+        <fieldset disabled={readOnly} style={{border:0,padding:0,margin:0,minWidth:0}}>
         {/* Course */}
         <Field label="Course" required>
           <select value={form.courseId} onChange={e=>setForm(f=>({...f,courseId:e.target.value,instructorId:"",groupIds:[]}))}>
@@ -544,7 +126,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
         {pal&&(
           <div style={{marginBottom:12,padding:"8px 10px",borderRadius:"var(--r)",
             background:pal.bg,border:`1px solid ${pal.border}`,
-            display:"flex",alignItems:"center",gap:8,fontSize:11,color:pal.accent}}>
+            display:"flex",alignItems:"center",gap:8,fontSize:14,color:pal.accent}}>
             <span style={{width:8,height:8,borderRadius:"50%",background:pal.accent,flexShrink:0}}/>
             {selCourse.name} · {selCourse.credits} credits · {selCourse.category}
           </div>
@@ -571,7 +153,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
 
         {/* Optional custom time within the slot */}
         <div style={{marginBottom:12}}>
-          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:11,color:"var(--muted)",cursor:"pointer"}}>
+          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12.5,color:"var(--muted)",cursor:"pointer"}}>
             <input type="checkbox" checked={useCustom} onChange={e=>toggleCustom(e.target.checked)}
               style={{width:"auto",margin:0}}/>
             Custom time {slotObj&&<span style={{color:"var(--muted2)"}}>(default: whole slot{slotObj.label?`, ${slotObj.label}`:""})</span>}
@@ -586,14 +168,14 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
                   <input type="time" value={form.end||""} onChange={e=>setForm(f=>({...f,end:e.target.value}))}/>
                 </Field>
               </div>
-              {!timesCheck.ok&&<div style={{fontSize:11,color:"var(--danger)",marginTop:-4}}>{timesCheck.message}</div>}
+              {!timesCheck.ok&&<div style={{fontSize:12.5,color:"var(--danger)",marginTop:-4}}>{timesCheck.message}</div>}
               {timesCheck.ok&&timesCheck.outsideSlot&&(
-                <div style={{fontSize:11,color:"var(--warn)",marginTop:-4}}>
+                <div style={{fontSize:12.5,color:"var(--warn)",marginTop:-4}}>
                   These times extend outside the {slotObj?.short||"slot"} window; the session will still show in that slot.
                 </div>
               )}
               {!slotRange(slotObj)&&(
-                <div style={{fontSize:10,color:"var(--muted2)",marginTop:2}}>
+                <div style={{fontSize:11.5,color:"var(--muted2)",marginTop:2}}>
                   Tip: put times in the slot name (Settings, e.g. "09:00 – 12:00") so sessions in different slots can be checked against each other.
                 </div>
               )}
@@ -643,11 +225,8 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
         {conflicts.length>0&&(
           <div style={{marginBottom:12}}>
             {conflicts.map((c,i)=>(
-              <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",
-                padding:"7px 10px",borderRadius:"var(--r)",marginBottom:4,
-                background:`rgba(248,113,113,${overrides[c.type]?0.04:0.12})`,
-                border:`1px solid rgba(248,113,113,${overrides[c.type]?0.15:0.3})`}}>
-                <span style={{fontSize:11,color:overrides[c.type]?"var(--muted)":"var(--danger)"}}>
+              <div key={i} className={overrides[c.type]?"callout":"callout bad"} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:4}}>
+                <span style={{fontSize:14,color:overrides[c.type]?"var(--muted)":"var(--danger)"}}>
                   {c.label} — {c.clash}
                 </span>
                 <Btn variant={overrides[c.type]?"outline":"danger"} size="xs"
@@ -659,28 +238,45 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
           </div>
         )}
 
+        {/* Pin */}
+        <label style={{display:"flex",alignItems:"flex-start",gap:8,marginBottom:12,cursor:readOnly?"default":"pointer"}}>
+          <input type="checkbox" checked={!!form.locked} onChange={e=>{const on=e.target.checked;setForm(f=>{const n={...f};if(on)n.locked=true;else delete n.locked;return n;});}} style={{width:"auto",margin:"3px 0 0"}}/>
+          <span style={{fontSize:14}}><b>Pin this session</b><span style={{display:"block",color:"var(--muted)",fontSize:14}}>Auto-schedule won't move or remove it.</span></span>
+        </label>
+
         {/* Schedule All */}
         {!isEdit&&(
           <label style={{display:"flex",alignItems:"center",gap:8,marginBottom:16,cursor:"pointer",
             padding:"8px 10px",borderRadius:"var(--r)",background:"var(--bg3)",
             border:"1px solid var(--border)"}}>
             <input type="checkbox" checked={scheduleAll} onChange={e=>setScheduleAll(e.target.checked)}/>
-            <span style={{fontSize:11,color:"var(--text)"}}>Schedule across all 16 weeks (skips conflicts)</span>
+            <span style={{fontSize:14,color:"var(--text)"}}>Repeat in every week (skips weeks with clashes)</span>
           </label>
         )}
+        </fieldset>
 
         {/* Actions */}
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",paddingTop:4}}>
+        {confirmDelete&&!readOnly&&(
+          <div className="callout bad" role="alertdialog" style={{marginBottom:12}}>
+            <div style={{marginBottom:8}}>{appt?.locked?"This session is pinned. ":""}Delete this session{appt?.courseCode?` (${appt.courseCode})`:""}? Its comments are deleted too.</div>
+            <div style={{display:"flex",gap:8}}>
+              <Btn variant="danger" onClick={()=>onDelete(appt.id)}>Delete session</Btn>
+              <Btn variant="outline" onClick={()=>setConfirmDelete(false)}>Keep it</Btn>
+            </div>
+          </div>
+        )}
+        {isEdit&&<div style={{marginBottom:14}}><CommentsPanel apptId={appt.id}/></div>}
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexWrap:"wrap",paddingTop:4}}>
           <div>
-            {isEdit&&<Btn variant="danger" onClick={()=>{onDelete(appt.id);onClose();}}>Delete</Btn>}
+            {isEdit&&!readOnly&&!confirmDelete&&<Btn variant="danger" onClick={()=>setConfirmDelete(true)}>Delete</Btn>}
           </div>
           <div style={{display:"flex",gap:8}}>
-            <Btn variant="outline" onClick={onClose}>Cancel</Btn>
-            <Btn variant="primary" onClick={handleSave}
+            <Btn variant="outline" onClick={onClose}>{readOnly?"Close":"Cancel"}</Btn>
+            {!readOnly&&<Btn variant="primary" onClick={handleSave}
               disabled={!form.courseId||blockingConflicts.length>0||!timesCheck.ok||deletedRemotely}
               style={{minWidth:90}}>
               {isEdit?"Update":"Schedule"}
-            </Btn>
+            </Btn>}
           </div>
         </div>
       </div>
@@ -697,49 +293,31 @@ function ApptChip({appt,courses,instructors,rooms,onClick,conflicts=[]}) {
   const instr=instructors.find(x=>x.id===appt.instructorId);
   const room=rooms.find(x=>x.id===appt.roomId);
   const editors=useContext(PresenceCtx).editing[appt.id]||[];
+  const openComments=useContext(CollabCtx).comments.open[appt.id]||0;
+  const label=`${appt.courseCode} ${appt.courseName}${instr?`, ${instr.name}`:""}${room?`, ${room.name}`:""}${hasConflict?", has a clash":""}${appt.locked?", pinned":""}${openComments?`, ${openComments} open comment${openComments>1?"s":""}`:""}`;
   return (
-    <div onClick={()=>onClick(appt)}
+    <button type="button" className={`session${hasConflict?" clash":""}`} onClick={e=>{e.stopPropagation();onClick(appt);}}
+      aria-label={label}
       title={editors.length?`Being edited by ${editors.map(e=>e.name).join(", ")}`:undefined}
-      style={{background:pal.bg,border:`1px solid ${hasConflict?"var(--danger)":editors.length?editors[0].color:pal.border}`,
-        boxShadow:editors.length?`0 0 0 1px ${editors[0].color}`:undefined,
-        borderRadius:"var(--r)",padding:"5px 7px",cursor:"pointer",marginBottom:3,
-        transition:"all 0.12s",position:"relative",overflow:"hidden"}}>
+      style={{background:pal.bg,borderColor:editors.length?editors[0].color:pal.border,borderLeftColor:pal.accent,color:pal.accent,
+        boxShadow:editors.length?`0 0 0 1px ${editors[0].color}`:undefined}}>
+      <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:1}}>
+        <span className="code">{appt.courseCode}{appt.section?` §${appt.section}`:""}</span>
+        {customLabel(appt)&&<span title="Custom time" style={{fontSize:11.5,fontFamily:"var(--mono)",color:"var(--muted)"}}>{customLabel(appt)}</span>}
+        <span style={{flex:1}}/>
+        {appt.locked&&<span title="Pinned: auto-schedule won't move it" style={{display:"inline-flex"}}><Icon name="lock" size={13}/></span>}
+        {openComments>0&&<span title={`${openComments} open comment${openComments>1?"s":""}`} style={{display:"inline-flex",alignItems:"center",gap:2,fontSize:11.5,fontWeight:700}}><Icon name="chat" size={13}/>{openComments}</span>}
+      </div>
+      <div className="sname">{appt.courseName}</div>
+      {(instr||room)&&<div className="smeta">{instr?instr.name.split(" ").slice(-1)[0]:""}{instr&&room?" · ":""}{room?room.name:""}</div>}
       {editors.length>0&&(
-        <div style={{position:"absolute",bottom:2,right:3,display:"flex",gap:2}}>
-          {editors.slice(0,3).map((e,i)=>(
-            <span key={i} title={e.name} style={{width:12,height:12,borderRadius:"50%",background:e.color,
-              color:"#fff",fontSize:7,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"}}>
-              {initials(e.name)}
-            </span>
+        <div style={{position:"absolute",bottom:3,right:4,display:"flex",gap:2}}>
+          {editors.slice(0,3).map((e,k)=>(
+            <span key={k} title={e.name} style={{width:16,height:16,borderRadius:"50%",background:e.color,color:"#fff",fontSize:11,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"}}>{initials(e.name)}</span>
           ))}
         </div>
       )}
-      {hasConflict&&(
-        <div style={{position:"absolute",top:0,right:0,width:0,height:0,
-          borderStyle:"solid",borderWidth:"0 16px 16px 0",
-          borderColor:`transparent var(--danger) transparent transparent`}}/>
-      )}
-      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:2}}>
-        <span style={{fontSize:9,fontFamily:"var(--mono)",fontWeight:600,color:pal.accent,
-          background:"rgba(0,0,0,0.06)",padding:"1px 4px",borderRadius:3}}>
-          {appt.courseCode}{appt.section?` §${appt.section}`:""}
-        </span>
-        {customLabel(appt)&&(
-          <span title="Custom time" style={{fontSize:8,fontFamily:"var(--mono)",color:"var(--muted)"}}>
-            {customLabel(appt)}
-          </span>
-        )}
-      </div>
-      <div style={{fontSize:10,fontWeight:500,color:pal.accent,lineHeight:1.3,
-        whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
-        {appt.courseName}
-      </div>
-      {instr&&<div style={{fontSize:9,color:"var(--muted)",marginTop:2,
-        whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
-        {instr.name.split(" ").slice(-1)[0]}
-        {room?" · "+room.name:""}
-      </div>}
-    </div>
+    </button>
   );
 }
 
@@ -764,7 +342,7 @@ function exportCohortHTML(state, groupId) {
   });
 
   const weeks=WEEKS.filter(w=>w.n>0);
-  const PALETTE_MAP=Object.fromEntries(PALETTE.map(p=>[p.id,p]));
+  
 
   let rows="";
   weeks.forEach(w=>{
@@ -794,7 +372,7 @@ function exportCohortHTML(state, groupId) {
         if(cells.length===0){rows+=`<td class="empty"></td>`;return;}
         const esc=v=>String(v??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
         const block=cell=>{
-          const pal=PALETTE_MAP[courses.find(x=>x.id===cell.courseId)?.colorId]||PALETTE[0];
+          const pal=getPalette(cell.courseId,courses);
           const instr=instructors.find(x=>x.id===cell.instructorId);
           const room=rooms.find(x=>x.id===cell.roomId);
           return {pal,html:`
@@ -911,43 +489,43 @@ function ExportDropdown({state,filterGroup}) {
   return (
     <div ref={ref} style={{position:"relative"}}>
       <Btn variant="outline" onClick={()=>setOpen(v=>!v)}>
-        ↓ Export {open?"▲":"▼"}
+        <Icon name="download" size={15}/> Export <Icon name={open?"up":"down"} size={14}/>
       </Btn>
       {open&&(
         <div style={{position:"absolute",top:"100%",right:0,marginTop:4,zIndex:50,
           background:"var(--bg3)",border:"1px solid var(--border2)",borderRadius:"var(--r2)",
           minWidth:220,boxShadow:"var(--shadow)",overflow:"hidden"}}>
           <div style={{padding:"8px 12px",borderBottom:"1px solid var(--border)",
-            fontSize:10,color:"var(--muted)",fontWeight:600,textTransform:"uppercase",letterSpacing:"0.08em"}}>
+            fontSize:11.5,color:"var(--muted)",fontWeight:600,textTransform:"uppercase",letterSpacing:"0.08em"}}>
             Export Cohort Timetable
           </div>
           {!targetGroup&&(
-            <div style={{padding:"10px 12px",fontSize:11,color:"var(--muted)"}}>
+            <div style={{padding:"10px 12px",fontSize:12.5,color:"var(--muted)"}}>
               Use the group filter to select a cohort first
             </div>
           )}
           {targetGroup&&(
             <>
               <div onClick={()=>{exportCohortHTML(state,targetGroup);setOpen(false);}}
-                style={{padding:"10px 14px",cursor:"pointer",fontSize:12,
+                style={{padding:"10px 14px",cursor:"pointer",fontSize:13,
                   borderBottom:"1px solid var(--border)",display:"flex",alignItems:"center",gap:8}}
                 onMouseEnter={e=>e.currentTarget.style.background="var(--bg4)"}
                 onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
                 <span style={{fontSize:14}}>🌐</span>
                 <div>
                   <div style={{fontWeight:500}}>Export as HTML</div>
-                  <div style={{fontSize:10,color:"var(--muted)"}}>Full printable timetable · open in browser</div>
+                  <div style={{fontSize:11.5,color:"var(--muted)"}}>Full printable timetable · open in browser</div>
                 </div>
               </div>
               <div onClick={()=>{exportCohortCSV(state,targetGroup);setOpen(false);}}
-                style={{padding:"10px 14px",cursor:"pointer",fontSize:12,
+                style={{padding:"10px 14px",cursor:"pointer",fontSize:13,
                   display:"flex",alignItems:"center",gap:8}}
                 onMouseEnter={e=>e.currentTarget.style.background="var(--bg4)"}
                 onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
                 <span style={{fontSize:14}}>📊</span>
                 <div>
                   <div style={{fontWeight:500}}>Export as CSV</div>
-                  <div style={{fontSize:10,color:"var(--muted)"}}>All sessions · open in Excel or Sheets</div>
+                  <div style={{fontSize:11.5,color:"var(--muted)"}}>All sessions · open in Excel or Sheets</div>
                 </div>
               </div>
             </>
@@ -957,7 +535,7 @@ function ExportDropdown({state,filterGroup}) {
             {groups.map(g=>(
               <button key={g.id}
                 onClick={()=>{exportCohortHTML(state,g.id);setOpen(false);}}
-                style={{fontSize:10,padding:"3px 8px",borderRadius:99,cursor:"pointer",
+                style={{fontSize:11.5,padding:"3px 8px",borderRadius:99,cursor:"pointer",
                   background:"var(--bg4)",border:"1px solid var(--border2)",
                   color:"var(--muted)",fontFamily:"inherit"}}
                 onMouseEnter={e=>e.currentTarget.style.color="var(--accent)"}
@@ -976,148 +554,124 @@ function ExportDropdown({state,filterGroup}) {
 //  SCHEDULE TAB
 // ═══════════════════════════════════════════════════════════════════
 function ScheduleTab({state,onApptClick,onCellClick,conflicts}) {
-  const {appointments,courses,instructors,rooms,groups,week1Start,holidays,slots}=state;
+  const {appointments,courses,instructors,rooms,week1Start,holidays,slots}=state;
+  const {canEdit}=useContext(CollabCtx);
+  const isPhone=useMedia("(max-width: 760px)");
   const [filterGroup,setFilterGroup]=useState("");
   const [selWeek,setSelWeek]=useState(1);
-  const week=WEEKS.find(w=>w.n===selWeek)||WEEKS[1];
   const ws=getWeekStart(week1Start,selWeek);
 
-  function isHoliday(di) {
-    const d=slotDate(week1Start,selWeek,di);
-    return holidays.some(h=>h.date===iso(d));
-  }
-  function getHolidayName(di) {
-    const d=slotDate(week1Start,selWeek,di);
-    return holidays.find(h=>h.date===iso(d))?.name||"";
-  }
-
-  const filteredAppts=useMemo(()=>{
-    return Object.values(appointments).filter(a=>{
-      if(a.weekNum!==selWeek) return false;
-      if(filterGroup&&!(a.groupIds||[]).includes(filterGroup)) return false;
-      return true;
-    });
-  },[appointments,selWeek,filterGroup]);
+  const holidayOn=di=>{
+    const d=iso(slotDate(week1Start,selWeek,di));
+    return holidays.find(h=>h.date===d)||null;
+  };
 
   const apptMap=useMemo(()=>{
     const m={};
-    filteredAppts.forEach(a=>{
-      const k=`${a.dayIdx}_${a.timeId}`;
-      if(!m[k]) m[k]=[];
-      m[k].push(a);
+    Object.values(appointments).forEach(a=>{
+      if(a.weekNum!==selWeek) return;
+      if(filterGroup&&!(a.groupIds||[]).includes(filterGroup)) return;
+      (m[`${a.dayIdx}_${a.timeId}`]||=[]).push(a);
     });
     Object.values(m).forEach(list=>list.sort((x,y)=>startKey(x,slots)-startKey(y,slots)));
     return m;
-  },[filteredAppts,slots]);
+  },[appointments,selWeek,filterGroup,slots]);
+
+  const chip=a=><ApptChip key={a.id} appt={a} courses={courses} instructors={instructors} rooms={rooms} onClick={onApptClick} conflicts={conflicts}/>;
+  const addBtn=(di,slot,label)=>canEdit&&(
+    <button type="button" className="add-hint" aria-label={label} onClick={e=>{e.stopPropagation();onCellClick(selWeek,di,slot.id);}}
+      style={{width:"100%",background:"transparent",border:0}}><Icon name="plus" size={16}/></button>
+  );
 
   return (
     <div style={{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden",minHeight:0}}>
-      {/* Controls */}
-      <div style={{padding:"12px 16px",borderBottom:"1px solid var(--border)",
-        display:"flex",alignItems:"center",gap:10,flexShrink:0,flexWrap:"wrap"}}>
-        {/* Week navigator */}
+      <div className="no-print" style={{padding:"10px 16px",borderBottom:"1px solid var(--border)",display:"flex",alignItems:"center",gap:10,flexShrink:0,flexWrap:"wrap"}}>
         <div style={{display:"flex",alignItems:"center",gap:4}}>
-          <Btn variant="outline" onClick={()=>setSelWeek(v=>Math.max(0,v-1))}>◀</Btn>
-          <div style={{position:"relative"}}>
-            <select value={selWeek} onChange={e=>setSelWeek(+e.target.value)}
-              style={{width:140,paddingRight:24}}>
-              {WEEKS.map(w=><option key={w.n} value={w.n}>{w.label}</option>)}
-            </select>
-          </div>
-          <Btn variant="outline" onClick={()=>setSelWeek(v=>Math.min(16,v+1))}>▶</Btn>
+          <Btn variant="outline" icon label="Previous week" onClick={()=>setSelWeek(v=>Math.max(0,v-1))}><Icon name="left" size={16}/></Btn>
+          <select aria-label="Week" value={selWeek} onChange={e=>setSelWeek(+e.target.value)} style={{width:150}}>
+            {WEEKS.map(w=><option key={w.n} value={w.n}>{w.label}</option>)}
+          </select>
+          <Btn variant="outline" icon label="Next week" onClick={()=>setSelWeek(v=>Math.min(16,v+1))}><Icon name="right" size={16}/></Btn>
         </div>
-
-        {/* Date range */}
-        <span style={{fontSize:11,color:"var(--muted)",fontFamily:"var(--mono)"}}>
-          {fmt(ws)} — {fmt(addDays(ws,4))}
-        </span>
-
+        <span style={{fontSize:14,color:"var(--muted)",fontFamily:"var(--mono)"}}>{fmt(ws)} to {fmt(addDays(ws,4))}</span>
         <div style={{flex:1}}/>
-
-        {/* Group filter */}
-        <select value={filterGroup} onChange={e=>setFilterGroup(e.target.value)}
-          style={{width:140}}>
+        <select aria-label="Filter by student group" value={filterGroup} onChange={e=>setFilterGroup(e.target.value)} style={{width:150}}>
           <option value="">All groups</option>
           {state.groups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
         </select>
-
-        {/* Cohort export */}
         <ExportDropdown state={state} filterGroup={filterGroup}/>
       </div>
 
-      {/* Grid */}
-      <div style={{flex:1,overflowY:"auto",overflowX:"auto",padding:12,minHeight:0,WebkitOverflowScrolling:"touch"}}>
-        <table style={{width:"100%",borderCollapse:"separate",borderSpacing:3}}>
-          <thead>
-            <tr>
-              <th style={{width:80,fontSize:10,color:"var(--muted)",fontWeight:600,
-                textTransform:"uppercase",letterSpacing:"0.08em",textAlign:"left",
-                padding:"6px 8px"}}>Slot</th>
-              {DAYS.map((d,di)=>{
-                const dt=slotDate(week1Start,selWeek,di);
-                const hol=isHoliday(di);
-                return (
-                  <th key={di} style={{fontSize:11,padding:"6px 8px",textAlign:"left",
-                    fontWeight:500,color:hol?"var(--warn)":"var(--text)"}}>
-                    <div>{d}</div>
-                    <div style={{fontFamily:"var(--mono)",fontSize:9,color:hol?"var(--warn)":"var(--muted)",fontWeight:400}}>
-                      {hol?getHolidayName(di):fmt(dt)}
-                    </div>
-                  </th>
-                );
-              })}
-            </tr>
-          </thead>
-          <tbody>
-            {slots.map(slot=>(
-              <tr key={slot.id}>
-                <td style={{verticalAlign:"top",padding:"6px 8px"}}>
-                  <div style={{fontSize:10,fontWeight:600,color:"var(--accent)",fontFamily:"var(--mono)"}}>
-                    {slot.short.toUpperCase()}
-                  </div>
-                  <div style={{fontSize:9,color:"var(--muted2)",marginTop:1}}>{slot.label}</div>
-                </td>
-                {DAYS.map((_,di)=>{
-                  const hol=isHoliday(di);
-                  const key=`${di}_${slot.id}`;
-                  const cells=apptMap[key]||[];
-                  return (
-                    <td key={di} style={{verticalAlign:"top",
-                      background:hol?"rgba(251,191,36,0.04)":"var(--bg2)",
-                      border:`1px solid ${hol?"rgba(251,191,36,0.15)":"var(--border)"}`,
-                      borderRadius:"var(--r)",padding:4,minHeight:80,width:"18%",cursor:"pointer"}}
-                      onClick={()=>{if(!hol&&cells.length===0)onCellClick(selWeek,di,slot.id);}}>
-                      {hol?(
-                        <div style={{padding:"4px 6px",color:"var(--warn)",fontSize:9,
-                          textAlign:"center",marginTop:8}}>Holiday</div>
-                      ):(
-                        <>
-                          {cells.map(a=>(
-                            <ApptChip key={a.id} appt={a} courses={courses}
-                              instructors={instructors} rooms={rooms}
-                              onClick={onApptClick} conflicts={conflicts}/>
-                          ))}
-                          {cells.length>0&&(
-                            <div title="Add another session in this slot (use Custom time to fit two)"
-                              onClick={e=>{e.stopPropagation();onCellClick(selWeek,di,slot.id);}}
-                              style={{textAlign:"center",fontSize:9,color:"var(--muted2)",opacity:0.55,padding:"2px 0",cursor:"pointer"}}>
-                              + add
-                            </div>
-                          )}
-                          {cells.length===0&&(
-                            <div style={{height:60,display:"flex",alignItems:"center",
-                              justifyContent:"center",color:"var(--muted2)",fontSize:10,
-                              opacity:0.4}}>+</div>
-                          )}
-                        </>
-                      )}
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div style={{flex:1,overflow:"auto",padding:isPhone?12:16,minHeight:0,WebkitOverflowScrolling:"touch"}}>
+        {!isPhone?(
+          <div className="sheet-wrap">
+            <table className="sheet">
+              <thead>
+                <tr>
+                  <th className="period" style={{background:"var(--bg3)"}}><span className="sr-only">Period</span></th>
+                  {DAYS.map((d,di)=>{
+                    const h=holidayOn(di);
+                    return (
+                      <th key={di} style={{color:h?"var(--warn)":undefined}}>
+                        <div>{d}</div>
+                        <div style={{fontFamily:"var(--mono)",fontSize:13,fontWeight:500,color:h?"var(--warn)":"var(--muted)"}}>{h?(h.name||"Holiday"):fmt(slotDate(week1Start,selWeek,di))}</div>
+                      </th>
+                    );
+                  })}
+                </tr>
+              </thead>
+              <tbody>
+                {slots.map(slot=>(
+                  <tr key={slot.id}>
+                    <th scope="row" className="period" style={{textAlign:"left"}}>
+                      <div className="period-name">{slot.short}</div>
+                      <div className="period-time">{slot.label}</div>
+                    </th>
+                    {DAYS.map((_,di)=>{
+                      const h=holidayOn(di), cells=apptMap[`${di}_${slot.id}`]||[];
+                      if(h) return <td key={di} className="cell holiday" style={{textAlign:"center",color:"var(--warn)",fontSize:14}}>{cells.length?cells.map(chip):"Holiday"}</td>;
+                      return (
+                        <td key={di} className={`cell${canEdit?"":" readonly"}`}
+                          onClick={()=>{if(canEdit&&cells.length===0)onCellClick(selWeek,di,slot.id);}}>
+                          {cells.map(chip)}
+                          {addBtn(di,slot,cells.length?`Add another session, ${DAYS[di]} ${slot.short}`:`Add a session, ${DAYS[di]} ${slot.short}`)}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ):(
+          <div className="agenda">
+            {DAYS.map((d,di)=>{
+              const h=holidayOn(di);
+              return (
+                <section key={di} aria-label={DAYS_FULL[di]} style={{background:"var(--bg2)",border:"1px solid var(--border2)",borderRadius:"var(--r2)",overflow:"hidden"}}>
+                  <h2 style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",padding:"10px 12px",background:"var(--bg3)",fontSize:15,fontWeight:700,color:h?"var(--warn)":undefined}}>
+                    {DAYS_FULL[di]}<span style={{fontFamily:"var(--mono)",fontSize:12.5,fontWeight:500,color:h?"var(--warn)":"var(--muted)"}}>{h?(h.name||"Holiday"):fmt(slotDate(week1Start,selWeek,di))}</span>
+                  </h2>
+                  {slots.map(slot=>{
+                    const cells=apptMap[`${di}_${slot.id}`]||[];
+                    if(h&&!cells.length) return null;
+                    return (
+                      <div key={slot.id} style={{padding:"8px 12px",borderTop:"1px solid var(--border)"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",fontSize:14,marginBottom:cells.length||canEdit?6:0}}>
+                          <b>{slot.short}</b><span style={{fontFamily:"var(--mono)",color:"var(--muted)"}}>{slot.label}</span>
+                        </div>
+                        {cells.map(chip)}
+                        {!h&&canEdit&&<Btn variant="outline" size="sm" onClick={()=>onCellClick(selWeek,di,slot.id)} style={{width:"100%"}}><Icon name="plus" size={15}/> {cells.length?"Add another":"Add a session"}</Btn>}
+                        {!cells.length&&!canEdit&&<div style={{color:"var(--muted2)",fontSize:14}}>Nothing scheduled</div>}
+                      </div>
+                    );
+                  })}
+                  {h&&!slots.some(sl=>(apptMap[`${di}_${sl.id}`]||[]).length)&&<div style={{padding:"10px 12px",color:"var(--warn)",fontSize:14}}>No classes. {h.name||"Holiday"}.</div>}
+                </section>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1137,14 +691,14 @@ function DashboardTab({state,conflicts}) {
   const byCourse=courses.map(c=>({
     ...c,
     count:apptList.filter(a=>a.courseId===c.id).length,
-    pal:PALETTE.find(p=>p.id===c.colorId)||PALETTE[0],
+    pal:paletteById(c.colorId),
   })).sort((a,b)=>b.count-a.count);
 
   // Load per instructor
   const byInstructor=instructors.map(i=>({
     ...i,
     count:apptList.filter(a=>a.instructorId===i.id).length,
-    pal:PALETTE.find(p=>p.id===i.colorId)||PALETTE[0],
+    pal:paletteById(i.colorId),
   })).sort((a,b)=>b.count-a.count);
 
   // Sessions by day
@@ -1154,12 +708,12 @@ function DashboardTab({state,conflicts}) {
   const StatCard=({label,value,sub,color="var(--text)"})=>(
     <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",
       padding:"14px 16px",flex:1,minWidth:120}}>
-      <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",
+      <div style={{fontSize:11.5,color:"var(--muted)",textTransform:"uppercase",
         letterSpacing:"0.08em",fontWeight:600,marginBottom:6}}>{label}</div>
       <div style={{fontSize:24,fontWeight:700,color,fontFamily:"var(--mono)",letterSpacing:"-0.02em"}}>
         {value}
       </div>
-      {sub&&<div style={{fontSize:10,color:"var(--muted)",marginTop:4}}>{sub}</div>}
+      {sub&&<div style={{fontSize:11.5,color:"var(--muted)",marginTop:4}}>{sub}</div>}
     </div>
   );
 
@@ -1167,7 +721,7 @@ function DashboardTab({state,conflicts}) {
     <div style={{padding:16,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",height:"100%"}}>
       <div style={{marginBottom:20}}>
         <div style={{fontSize:16,fontWeight:700,marginBottom:4}}>Overview</div>
-        <div style={{color:"var(--muted)",fontSize:11}}>{state.settings.semester}</div>
+        <div style={{color:"var(--muted)",fontSize:12.5}}>{state.settings.semester}</div>
       </div>
 
       {/* Stat cards */}
@@ -1175,7 +729,7 @@ function DashboardTab({state,conflicts}) {
         <StatCard label="Total Sessions" value={totalSessions} sub={`across ${scheduledWeeks} weeks`}/>
         <StatCard label="Conflicts" value={conflictCount}
           color={conflictCount>0?"var(--danger)":"var(--accent)"}
-          sub={conflictCount===0?"All clear ✓":"Need attention"}/>
+          sub={conflictCount===0?"All clear":"Need attention"}/>
         <StatCard label="Instructors" value={instructors.length} sub={`${instructors.filter(i=>i.available).length} available`}/>
         <StatCard label="Rooms" value={rooms.length} sub={`${rooms.length} venues`}/>
         <StatCard label="Courses" value={courses.length} sub={`${groups.length} student groups`}/>
@@ -1184,17 +738,17 @@ function DashboardTab({state,conflicts}) {
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:20}}>
         {/* Sessions by day */}
         <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:14}}>
-          <div style={{fontSize:11,fontWeight:600,marginBottom:12,color:"var(--muted)"}}>
+          <div style={{fontSize:12.5,fontWeight:600,marginBottom:12,color:"var(--muted)"}}>
             SESSIONS BY DAY
           </div>
           {byDay.map(({day,count})=>(
             <div key={day} style={{display:"flex",alignItems:"center",gap:8,marginBottom:7}}>
-              <span style={{width:28,fontSize:10,fontFamily:"var(--mono)",color:"var(--muted)",flexShrink:0}}>{day}</span>
+              <span style={{width:28,fontSize:11.5,fontFamily:"var(--mono)",color:"var(--muted)",flexShrink:0}}>{day}</span>
               <div style={{flex:1,background:"var(--bg4)",borderRadius:3,height:6,overflow:"hidden"}}>
                 <div style={{width:`${(count/maxDay)*100}%`,height:"100%",
                   background:"var(--accent)",borderRadius:3,transition:"width 0.5s"}}/>
               </div>
-              <span style={{fontSize:10,fontFamily:"var(--mono)",color:"var(--text)",
+              <span style={{fontSize:11.5,fontFamily:"var(--mono)",color:"var(--text)",
                 width:20,textAlign:"right"}}>{count}</span>
             </div>
           ))}
@@ -1202,7 +756,7 @@ function DashboardTab({state,conflicts}) {
 
         {/* Instructor load */}
         <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:14}}>
-          <div style={{fontSize:11,fontWeight:600,marginBottom:12,color:"var(--muted)"}}>
+          <div style={{fontSize:12.5,fontWeight:600,marginBottom:12,color:"var(--muted)"}}>
             INSTRUCTOR LOAD
           </div>
           {byInstructor.map(i=>{
@@ -1210,11 +764,11 @@ function DashboardTab({state,conflicts}) {
             return (
               <div key={i.id} style={{marginBottom:8}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
-                  <span style={{fontSize:10,color:"var(--text)",
+                  <span style={{fontSize:11.5,color:"var(--text)",
                     whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:"70%"}}>
                     {i.name.split(" ").slice(-1)[0]}
                   </span>
-                  <span style={{fontSize:9,fontFamily:"var(--mono)",
+                  <span style={{fontSize:11,fontFamily:"var(--mono)",
                     color:pct>90?"var(--danger)":pct>70?"var(--warn)":"var(--muted)"}}>
                     {i.count}/{i.maxLoad}
                   </span>
@@ -1231,7 +785,7 @@ function DashboardTab({state,conflicts}) {
 
       {/* Course breakdown */}
       <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:14}}>
-        <div style={{fontSize:11,fontWeight:600,marginBottom:12,color:"var(--muted)"}}>
+        <div style={{fontSize:12.5,fontWeight:600,marginBottom:12,color:"var(--muted)"}}>
           COURSE BREAKDOWN
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:8}}>
@@ -1240,12 +794,12 @@ function DashboardTab({state,conflicts}) {
               border:`1px solid ${c.pal.border}`,padding:"10px 12px"}}>
               <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
                 <span style={{width:6,height:6,borderRadius:"50%",background:c.pal.accent,flexShrink:0}}/>
-                <span style={{fontSize:9,fontFamily:"var(--mono)",fontWeight:600,color:c.pal.accent}}>{c.code}</span>
+                <span style={{fontSize:11,fontFamily:"var(--mono)",fontWeight:600,color:c.pal.accent}}>{c.code}</span>
                 <Badge color="muted" style={{marginLeft:"auto"}}>{c.category}</Badge>
               </div>
-              <div style={{fontSize:11,fontWeight:500,marginBottom:3,color:"var(--text)",
+              <div style={{fontSize:12.5,fontWeight:500,marginBottom:3,color:"var(--text)",
                 whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{c.name}</div>
-              <div style={{fontSize:10,color:"var(--muted)"}}>
+              <div style={{fontSize:11.5,color:"var(--muted)"}}>
                 {c.count} session{c.count!==1?"s":""} · {c.credits} credits
               </div>
             </div>
@@ -1419,11 +973,11 @@ function CSVImportModal({state,setState,toast,onClose}) {
           <>
             <div style={{background:"var(--bg3)",border:"1px solid var(--border2)",borderRadius:"var(--r2)",
               padding:20,textAlign:"center",marginBottom:16}}>
-              <div style={{fontSize:28,marginBottom:8}}>📄</div>
-              <div style={{fontSize:13,fontWeight:500,marginBottom:4}}>Drop your CSV file here or click to browse</div>
-              <div style={{fontSize:11,color:"var(--muted)",marginBottom:14}}>
+              <div style={{marginBottom:8,color:"var(--muted)"}}><Icon name="download" size={28}/></div>
+              <div style={{fontSize:14,fontWeight:500,marginBottom:4}}>Drop your CSV file here or click to browse</div>
+              <div style={{fontSize:12.5,color:"var(--muted)",marginBottom:14}}>
                 Columns: Course Name, Course Code, Instructor, Student Groups, Category, Credits
-                <br/><span style={{fontSize:10,color:"var(--muted2)"}}>Tip: separate multiple groups with a pipe character e.g. <strong>CS-1A | CS-1B</strong></span>
+                <br/><span style={{fontSize:11.5,color:"var(--muted2)"}}>Tip: separate multiple groups with a pipe character e.g. <strong>CS-1A | CS-1B</strong></span>
               </div>
               <div style={{display:"flex",gap:8,justifyContent:"center",alignItems:"center"}}>
                 <label style={{display:"inline-block",cursor:"pointer"}}>
@@ -1431,22 +985,22 @@ function CSVImportModal({state,setState,toast,onClose}) {
                     onChange={e=>e.target.files[0]&&handleFile(e.target.files[0])}
                     style={{display:"none"}}/>
                   <span style={{display:"inline-flex",alignItems:"center",gap:6,
-                    background:"rgba(5,150,105,0.15)",color:"var(--accent)",
-                    border:"1px solid rgba(5,150,105,0.3)",borderRadius:"var(--r)",
-                    padding:"5px 10px",fontSize:11,fontWeight:500,cursor:"pointer",
-                    fontFamily:"'Outfit',sans-serif"}}>
+                    background:"var(--accent-soft)",color:"var(--accent)",
+                    border:"1px solid var(--accent-line)",borderRadius:"var(--r)",
+                    padding:"5px 10px",fontSize:12.5,fontWeight:500,cursor:"pointer",
+                    fontFamily:"inherit"}}>
                     Browse File
                   </span>
                 </label>
-                <Btn variant="outline" onClick={downloadTemplate}>↓ Download Template</Btn>
+                <Btn variant="outline" onClick={downloadTemplate}><Icon name="download" size={15}/> Download template</Btn>
               </div>
             </div>
-            {error&&<div style={{color:"var(--danger)",fontSize:11,marginBottom:12}}>{error}</div>}
+            {error&&<div style={{color:"var(--danger)",fontSize:12.5,marginBottom:12}}>{error}</div>}
             <div style={{background:"var(--bg3)",borderRadius:"var(--r)",padding:12,
               border:"1px solid var(--border)"}}>
-              <div style={{fontSize:10,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",
+              <div style={{fontSize:11.5,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",
                 letterSpacing:"0.08em",marginBottom:8}}>Expected Format</div>
-              <pre style={{fontSize:10,fontFamily:"var(--mono)",color:"var(--muted)",
+              <pre style={{fontSize:11.5,fontFamily:"var(--mono)",color:"var(--muted)",
                 overflowX:"auto",lineHeight:1.6}}>
 {`Course Name,Course Code,Instructor,Student Groups,Category,Credits
 Intro to Python,CS101,Dr. Alice Chen,CS-1A,Core,3
@@ -1459,7 +1013,7 @@ Machine Learning,CS401,Prof. James Wright,Year 1 | Year 2,Elective,4`}
         {step==="preview"&&preview&&(
           <>
             <div style={{marginBottom:14}}>
-              <div style={{fontSize:12,fontWeight:600,marginBottom:10}}>
+              <div style={{fontSize:13,fontWeight:600,marginBottom:10}}>
                 Column Mapping — {preview.rows.length} rows detected
               </div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
@@ -1484,11 +1038,11 @@ Machine Learning,CS401,Prof. James Wright,Year 1 | Year 2,Elective,4`}
             {/* Preview table */}
             <div style={{background:"var(--bg3)",borderRadius:"var(--r)",padding:10,
               border:"1px solid var(--border)",marginBottom:14,maxHeight:200,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain"}}>
-              <div style={{fontSize:10,color:"var(--muted)",marginBottom:8,fontWeight:600,
+              <div style={{fontSize:11.5,color:"var(--muted)",marginBottom:8,fontWeight:600,
                 textTransform:"uppercase",letterSpacing:"0.08em"}}>
                 Preview (first 5 rows)
               </div>
-              <table style={{width:"100%",borderCollapse:"collapse",fontSize:10}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:11.5}}>
                 <thead>
                   <tr>{preview.headers.map(h=>(
                     <th key={h} style={{textAlign:"left",padding:"3px 6px",
@@ -1509,7 +1063,7 @@ Machine Learning,CS401,Prof. James Wright,Year 1 | Year 2,Elective,4`}
             </div>
 
             <div style={{display:"flex",gap:8}}>
-              <Btn variant="outline" onClick={()=>setStep("upload")}>← Back</Btn>
+              <Btn variant="outline" onClick={()=>setStep("upload")}><Icon name="left" size={15}/> Back</Btn>
               <Btn variant="primary" onClick={handleImport}
                 disabled={!mapping.courseName}
                 style={{flex:1,justifyContent:"center"}}>
@@ -1521,7 +1075,7 @@ Machine Learning,CS401,Prof. James Wright,Year 1 | Year 2,Elective,4`}
 
         {step==="done"&&parseResult&&(
           <div style={{textAlign:"center",padding:"20px 0"}}>
-            <div style={{fontSize:36,marginBottom:12}}>✓</div>
+            <div style={{marginBottom:12,color:"var(--accent)"}}><Icon name="check" size={36}/></div>
             <div style={{fontSize:14,fontWeight:600,color:"var(--accent)",marginBottom:16}}>
               Import Complete
             </div>
@@ -1537,11 +1091,11 @@ Machine Learning,CS401,Prof. James Wright,Year 1 | Year 2,Elective,4`}
                     color:color==="green"?"var(--accent)":color==="blue"?"var(--accent2)":"var(--text)"}}>
                     {val}
                   </div>
-                  <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>{label}</div>
+                  <div style={{fontSize:11.5,color:"var(--muted)",marginTop:2}}>{label}</div>
                 </div>
               ))}
             </div>
-            <div style={{fontSize:11,color:"var(--muted)",marginBottom:16}}>
+            <div style={{fontSize:12.5,color:"var(--muted)",marginBottom:16}}>
               All imported courses now appear in the Courses tab with their assigned instructors and groups.
               Head to Auto-Schedule to place them on the timetable.
             </div>
@@ -1601,12 +1155,12 @@ function CoursesTab({state,setState,toast}) {
         <div style={{padding:12,borderBottom:"1px solid var(--border)",display:"flex",gap:8}}>
           <input value={search} onChange={e=>setSearch(e.target.value)}
             placeholder="Search courses..." style={{flex:1}}/>
-          <Btn variant="outline" onClick={()=>setShowImport(true)}>↑ CSV</Btn>
+          <Btn variant="outline" onClick={()=>setShowImport(true)}>Import CSV</Btn>
           <Btn variant="accent" onClick={()=>setEditing({...blank})}>+ Add</Btn>
         </div>
         <div style={{flex:1,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch"}}>
           {filtered.map(c=>{
-            const pal=PALETTE.find(p=>p.id===c.colorId)||PALETTE[0];
+            const pal=paletteById(c.colorId);
             const sessions=Object.values(state.appointments).filter(a=>a.courseId===c.id).length;
             return (
               <div key={c.id} onClick={()=>setEditing({...c})}
@@ -1616,12 +1170,12 @@ function CoursesTab({state,setState,toast}) {
                   transition:"all 0.12s"}}>
                 <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
                   <span style={{width:8,height:8,borderRadius:"50%",background:pal.accent,flexShrink:0}}/>
-                  <span style={{fontSize:10,fontFamily:"var(--mono)",fontWeight:600,color:pal.accent}}>{c.code}</span>
+                  <span style={{fontSize:11.5,fontFamily:"var(--mono)",fontWeight:600,color:pal.accent}}>{c.code}</span>
                   <Badge color="muted">{c.category}</Badge>
-                  <span style={{marginLeft:"auto",fontSize:10,color:"var(--muted2)"}}>{sessions}×</span>
+                  <span style={{marginLeft:"auto",fontSize:11.5,color:"var(--muted2)"}}>{sessions}×</span>
                 </div>
-                <div style={{fontSize:12,fontWeight:500,color:"var(--text)"}}>{c.name}</div>
-                <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>{c.credits} credits</div>
+                <div style={{fontSize:13,fontWeight:500,color:"var(--text)"}}>{c.name}</div>
+                <div style={{fontSize:11.5,color:"var(--muted)",marginTop:2}}>{c.credits} credits</div>
               </div>
             );
           })}
@@ -1639,7 +1193,7 @@ function CoursesTab({state,setState,toast}) {
       )}
       {!editing&&(
         <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",
-          color:"var(--muted2)",fontSize:12}}>
+          color:"var(--muted2)",fontSize:13}}>
           Select a course to edit or click + Add
         </div>
       )}
@@ -1653,7 +1207,7 @@ function CoursesTab({state,setState,toast}) {
 
 function CourseEditor({form,setForm,instructors,groups,onSave,onDelete,onClose}) {
   const set=(k,v)=>setForm(f=>({...f,[k]:v}));
-  const pal=PALETTE.find(p=>p.id===form.colorId)||PALETTE[0];
+  const pal=paletteById(form.colorId);
   return (
     <div style={{padding:20}}>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
@@ -1711,7 +1265,7 @@ function CourseEditor({form,setForm,instructors,groups,onSave,onDelete,onClose})
         </div>
         <div style={{marginTop:8,padding:"8px 12px",borderRadius:"var(--r)",
           background:pal.bg,border:`1px solid ${pal.border}`,
-          fontSize:11,color:pal.accent}}>
+          fontSize:12.5,color:pal.accent}}>
           Preview: {form.code||"CODE"} · {form.name||"Course Name"}
         </div>
       </Field>
@@ -1772,7 +1326,7 @@ function InstructorsPanel({state,setState,toast}) {
         </div>
         <div style={{flex:1,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch"}}>
           {instructors.map(i=>{
-            const pal=PALETTE.find(p=>p.id===i.colorId)||PALETTE[0];
+            const pal=paletteById(i.colorId);
             const sessions=Object.values(appointments).filter(a=>a.instructorId===i.id).length;
             return (
               <div key={i.id} onClick={()=>setEditing({...i})}
@@ -1782,17 +1336,17 @@ function InstructorsPanel({state,setState,toast}) {
                 <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
                   <div style={{width:28,height:28,borderRadius:"50%",background:pal.bg,
                     border:`1px solid ${pal.border}`,display:"flex",alignItems:"center",
-                    justifyContent:"center",fontSize:9,fontWeight:700,color:pal.accent,flexShrink:0}}>
+                    justifyContent:"center",fontSize:11,fontWeight:700,color:pal.accent,flexShrink:0}}>
                     {initials(i.name)}
                   </div>
                   <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontSize:11,fontWeight:500,color:"var(--text)",
+                    <div style={{fontSize:12.5,fontWeight:500,color:"var(--text)",
                       whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{i.name}</div>
-                    <div style={{fontSize:9,color:"var(--muted)"}}>{i.dept}</div>
+                    <div style={{fontSize:11,color:"var(--muted)"}}>{i.dept}</div>
                   </div>
                   <Badge color={i.available?"green":"red"}>{i.available?"Active":"Away"}</Badge>
                 </div>
-                <div style={{fontSize:9,color:"var(--muted2)",display:"flex",gap:8}}>
+                <div style={{fontSize:11,color:"var(--muted2)",display:"flex",gap:8}}>
                   <span>{sessions} sessions</span>
                   <span>·</span>
                   <span>Max {i.maxLoad}</span>
@@ -1805,7 +1359,7 @@ function InstructorsPanel({state,setState,toast}) {
       {editing&&(
         <div style={{flex:1,padding:20,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain"}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
-            <div style={{fontSize:13,fontWeight:600}}>{editing.id?"Edit Instructor":"New Instructor"}</div>
+            <div style={{fontSize:14,fontWeight:600}}>{editing.id?"Edit Instructor":"New Instructor"}</div>
             <div style={{display:"flex",gap:6}}>
               {editing.id&&<Btn variant="danger" onClick={()=>remove(editing.id)}>Delete</Btn>}
               <Btn variant="outline" onClick={()=>setEditing(null)}>Cancel</Btn>
@@ -1853,7 +1407,7 @@ function InstructorsPanel({state,setState,toast}) {
           </Field>
         </div>
       )}
-      {!editing&&<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:"var(--muted2)",fontSize:12}}>Select an instructor to edit</div>}
+      {!editing&&<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:"var(--muted2)",fontSize:13}}>Select an instructor to edit</div>}
     </div>
   );
 }
@@ -1895,10 +1449,10 @@ function RoomsPanel({state,setState,toast}) {
                 style={{padding:"10px 12px",borderBottom:"1px solid var(--border)",cursor:"pointer",
                   background:editing?.id===r.id?"var(--bg3)":"transparent"}}>
                 <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
-                  <span style={{fontSize:11,fontWeight:500}}>{r.name}</span>
+                  <span style={{fontSize:12.5,fontWeight:500}}>{r.name}</span>
                   <Badge color={tc} style={{marginLeft:"auto"}}>{r.type}</Badge>
                 </div>
-                <div style={{fontSize:10,color:"var(--muted)"}}>
+                <div style={{fontSize:11.5,color:"var(--muted)"}}>
                   {r.building} · {r.capacity} seats
                 </div>
               </div>
@@ -1909,7 +1463,7 @@ function RoomsPanel({state,setState,toast}) {
       {editing&&(
         <div style={{flex:1,padding:20,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain"}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
-            <div style={{fontSize:13,fontWeight:600}}>{editing.id?"Edit Room":"New Room"}</div>
+            <div style={{fontSize:14,fontWeight:600}}>{editing.id?"Edit Room":"New Room"}</div>
             <div style={{display:"flex",gap:6}}>
               {editing.id&&<Btn variant="danger" onClick={()=>remove(editing.id)}>Delete</Btn>}
               <Btn variant="outline" onClick={()=>setEditing(null)}>Cancel</Btn>
@@ -1935,7 +1489,7 @@ function RoomsPanel({state,setState,toast}) {
           </div>
         </div>
       )}
-      {!editing&&<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:"var(--muted2)",fontSize:12}}>Select a room to edit</div>}
+      {!editing&&<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:"var(--muted2)",fontSize:13}}>Select a room to edit</div>}
     </div>
   );
 }
@@ -1969,9 +1523,9 @@ function GroupsPanel({state,setState,toast}) {
           style={{padding:`8px 12px`,paddingLeft:12+depth*16,borderBottom:"1px solid var(--border)",
             cursor:"pointer",background:editing?.id===g.id?"var(--bg3)":"transparent",
             display:"flex",alignItems:"center",gap:6}}>
-          <span style={{fontSize:10,color:"var(--muted2)"}}>{depth>0?"└":"●"}</span>
-          <span style={{fontSize:11,fontWeight:depth===0?600:400}}>{g.name}</span>
-          {g.size&&<span style={{fontSize:9,color:"var(--muted2)",marginLeft:"auto"}}>{g.size} students</span>}
+          <span style={{fontSize:11.5,color:"var(--muted2)"}}>{depth>0?"↳":"•"}</span>
+          <span style={{fontSize:12.5,fontWeight:depth===0?600:400}}>{g.name}</span>
+          {g.size&&<span style={{fontSize:11,color:"var(--muted2)",marginLeft:"auto"}}>{g.size} students</span>}
         </div>
         {children.map(c=><GroupNode key={c.id} g={c} depth={depth+1}/>)}
       </div>
@@ -1993,7 +1547,7 @@ function GroupsPanel({state,setState,toast}) {
       {editing&&(
         <div style={{flex:1,padding:20,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain"}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
-            <div style={{fontSize:13,fontWeight:600}}>{editing.id?"Edit Group":"New Group"}</div>
+            <div style={{fontSize:14,fontWeight:600}}>{editing.id?"Edit Group":"New Group"}</div>
             <div style={{display:"flex",gap:6}}>
               {editing.id&&<Btn variant="danger" onClick={()=>remove(editing.id)}>Delete</Btn>}
               <Btn variant="outline" onClick={()=>setEditing(null)}>Cancel</Btn>
@@ -2016,7 +1570,7 @@ function GroupsPanel({state,setState,toast}) {
           </div>
         </div>
       )}
-      {!editing&&<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:"var(--muted2)",fontSize:12}}>Select a group to edit</div>}
+      {!editing&&<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:"var(--muted2)",fontSize:13}}>Select a group to edit</div>}
     </div>
   );
 }
@@ -2070,23 +1624,23 @@ function InstructorTab({state,onApptClick}) {
           <Badge color={instr.available?"green":"red"}>{instr.available?"Available":"Away"}</Badge>
         )}
         <div style={{flex:1}}/>
-        <Btn variant="outline" onClick={downloadCSV}>↓ Export CSV</Btn>
+        <Btn variant="outline" onClick={downloadCSV}><Icon name="download" size={15}/> Export CSV</Btn>
       </div>
       {instr&&(
         <div style={{padding:"8px 14px",borderBottom:"1px solid var(--border)",flexShrink:0,
           display:"flex",alignItems:"center",gap:12,background:"var(--bg2)"}}>
           <div style={{width:32,height:32,borderRadius:"50%",
-            background:PALETTE.find(p=>p.id===instr.colorId)?.bg||"var(--bg4)",
-            border:`1px solid ${PALETTE.find(p=>p.id===instr.colorId)?.border||"var(--border)"}`,
+            background:paletteById(instr.colorId).bg,
+            border:`1px solid ${paletteById(instr.colorId).border}`,
             display:"flex",alignItems:"center",justifyContent:"center",
-            fontSize:10,fontWeight:700,color:PALETTE.find(p=>p.id===instr.colorId)?.accent||"var(--muted)"}}>
+            fontSize:11.5,fontWeight:700,color:paletteById(instr.colorId).accent}}>
             {initials(instr.name)}
           </div>
           <div>
-            <div style={{fontSize:12,fontWeight:600}}>{instr.name}</div>
-            <div style={{fontSize:10,color:"var(--muted)"}}>{instr.dept} · {instr.email}</div>
+            <div style={{fontSize:13,fontWeight:600}}>{instr.name}</div>
+            <div style={{fontSize:11.5,color:"var(--muted)"}}>{instr.dept} · {instr.email}</div>
           </div>
-          <div style={{marginLeft:"auto",fontSize:10,color:"var(--muted)"}}>
+          <div style={{marginLeft:"auto",fontSize:11.5,color:"var(--muted)"}}>
             {Object.values(appointments).filter(a=>a.instructorId===selInstructor).length} total sessions · max {instr.maxLoad}/week
           </div>
         </div>
@@ -2095,12 +1649,12 @@ function InstructorTab({state,onApptClick}) {
         <table style={{width:"100%",borderCollapse:"separate",borderSpacing:3}}>
           <thead>
             <tr>
-              <th style={{width:80,textAlign:"left",padding:"6px 8px",fontSize:10,color:"var(--muted)",
+              <th style={{width:80,textAlign:"left",padding:"6px 8px",fontSize:11.5,color:"var(--muted)",
                 textTransform:"uppercase",letterSpacing:"0.08em",fontWeight:600}}>Slot</th>
               {DAYS.map((d,di)=>(
-                <th key={di} style={{textAlign:"left",padding:"6px 8px",fontSize:11,fontWeight:500}}>
+                <th key={di} style={{textAlign:"left",padding:"6px 8px",fontSize:12.5,fontWeight:500}}>
                   <div>{d}</div>
-                  <div style={{fontSize:9,color:"var(--muted)",fontFamily:"var(--mono)",fontWeight:400}}>
+                  <div style={{fontSize:11,color:"var(--muted)",fontFamily:"var(--mono)",fontWeight:400}}>
                     {fmt(slotDate(week1Start,selWeek,di))}
                   </div>
                 </th>
@@ -2111,8 +1665,8 @@ function InstructorTab({state,onApptClick}) {
             {slots.map(slot=>(
               <tr key={slot.id}>
                 <td style={{verticalAlign:"top",padding:"6px 8px"}}>
-                  <div style={{fontSize:10,fontWeight:600,color:"var(--accent)",fontFamily:"var(--mono)"}}>{slot.short.toUpperCase()}</div>
-                  <div style={{fontSize:9,color:"var(--muted2)"}}>{slot.label}</div>
+                  <div style={{fontSize:11.5,fontWeight:600,color:"var(--accent)",fontFamily:"var(--mono)"}}>{slot.short.toUpperCase()}</div>
+                  <div style={{fontSize:11,color:"var(--muted2)"}}>{slot.label}</div>
                 </td>
                 {DAYS.map((_,di)=>{
                   const cells=(apptMap[`${di}_${slot.id}`])||[];
@@ -2125,7 +1679,7 @@ function InstructorTab({state,onApptClick}) {
                       ))}
                       {cells.length===0&&(
                         <div style={{height:50,display:"flex",alignItems:"center",
-                          justifyContent:"center",color:"var(--muted2)",fontSize:10,opacity:0.3}}>—</div>
+                          justifyContent:"center",color:"var(--muted2)",fontSize:11.5,opacity:0.3}}>—</div>
                       )}
                     </td>
                   );
@@ -2147,9 +1701,9 @@ function ConflictsTab({conflicts,state,onApptClick}) {
   if(!conflicts.length) return (
     <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
       height:"100%",gap:12}}>
-      <div style={{fontSize:32}}>✓</div>
+      <div style={{color:"var(--accent)"}}><Icon name="check" size={32}/></div>
       <div style={{fontSize:14,fontWeight:600,color:"var(--accent)"}}>No conflicts detected</div>
-      <div style={{fontSize:11,color:"var(--muted)"}}>Your schedule is clean and conflict-free</div>
+      <div style={{fontSize:12.5,color:"var(--muted)"}}>Your schedule is clean and conflict-free</div>
     </div>
   );
 
@@ -2166,7 +1720,7 @@ function ConflictsTab({conflicts,state,onApptClick}) {
       </div>
       {Object.entries(grouped).filter(([,v])=>v.length).map(([type,items])=>(
         <div key={type} style={{marginBottom:16}}>
-          <div style={{fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.1em",
+          <div style={{fontSize:11.5,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.1em",
             color:typeColor[type]||"var(--muted)",marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
             <span style={{width:6,height:6,borderRadius:"50%",background:typeColor[type],display:"inline-block"}}/>
             {typeLabel[type]} ({items.length})
@@ -2176,9 +1730,9 @@ function ConflictsTab({conflicts,state,onApptClick}) {
             const dayLabel=DAYS_FULL[c.a.dayIdx];
             const slotLabel=slots.find(x=>x.id===c.a.timeId)?.short||c.a.timeId;
             return (
-              <div key={i} style={{background:"var(--bg2)",border:`1px solid rgba(248,113,113,0.2)`,
+              <div key={i} style={{background:"var(--bg2)",border:"1px solid var(--danger-line)",
                 borderRadius:"var(--r2)",padding:"10px 12px",marginBottom:8}}>
-                <div style={{fontSize:10,color:"var(--muted)",marginBottom:6,fontFamily:"var(--mono)"}}>
+                <div style={{fontSize:11.5,color:"var(--muted)",marginBottom:6,fontFamily:"var(--mono)"}}>
                   {weekLabel} · {dayLabel} · {slotLabel}
                 </div>
                 <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
@@ -2188,11 +1742,11 @@ function ConflictsTab({conflicts,state,onApptClick}) {
                       <div key={j} onClick={()=>onApptClick(appt)}
                         style={{flex:1,minWidth:140,background:pal.bg,border:`1px solid ${pal.border}`,
                           borderRadius:"var(--r)",padding:"7px 10px",cursor:"pointer"}}>
-                        <div style={{fontSize:9,fontFamily:"var(--mono)",color:pal.accent,fontWeight:600,marginBottom:2}}>
+                        <div style={{fontSize:11,fontFamily:"var(--mono)",color:pal.accent,fontWeight:600,marginBottom:2}}>
                           {appt.courseCode}
                         </div>
-                        <div style={{fontSize:11,color:pal.accent}}>{appt.courseName}</div>
-                        <div style={{fontSize:9,color:"var(--muted)",fontFamily:"var(--mono)",marginTop:2}}>{timeLabel(appt,slots)}</div>
+                        <div style={{fontSize:12.5,color:pal.accent}}>{appt.courseName}</div>
+                        <div style={{fontSize:11,color:"var(--muted)",fontFamily:"var(--mono)",marginTop:2}}>{timeLabel(appt,slots)}</div>
                       </div>
                     );
                   })}
@@ -2211,23 +1765,23 @@ function ConflictsTab({conflicts,state,onApptClick}) {
 // ═══════════════════════════════════════════════════════════════════
 function ChangelogTab({log}) {
   if(!log.length) return (
-    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",color:"var(--muted2)",fontSize:12}}>
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",color:"var(--muted2)",fontSize:13}}>
       No activity yet
     </div>
   );
   return (
     <div style={{padding:16,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",height:"100%"}}>
-      <div style={{fontSize:13,fontWeight:600,marginBottom:12}}>Activity Log</div>
+      <div style={{fontSize:14,fontWeight:600,marginBottom:12}}>Activity Log</div>
       {[...log].reverse().map((e,i)=>(
         <div key={i} style={{display:"flex",gap:10,marginBottom:8,paddingBottom:8,
           borderBottom:"1px solid var(--border)"}}>
-          <div style={{fontSize:9,color:"var(--muted2)",fontFamily:"var(--mono)",
+          <div style={{fontSize:11,color:"var(--muted2)",fontFamily:"var(--mono)",
             whiteSpace:"nowrap",paddingTop:1,minWidth:80}}>
             {new Date(e.at).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})}
           </div>
           <div style={{flex:1}}>
-            <span style={{fontSize:10,fontWeight:500,color:"var(--text)"}}>{e.action}</span>
-            {e.detail&&<span style={{fontSize:10,color:"var(--muted)"}}> — {e.detail}</span>}
+            <span style={{fontSize:11.5,fontWeight:500,color:"var(--text)"}}>{e.action}</span>
+            {e.detail&&<span style={{fontSize:11.5,color:"var(--muted)"}}> — {e.detail}</span>}
           </div>
         </div>
       ))}
@@ -2297,7 +1851,7 @@ function SettingsTab({state,setState,toast}) {
       <div style={{fontSize:14,fontWeight:700,marginBottom:20}}>Settings</div>
 
       <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:16,marginBottom:16}}>
-        <div style={{fontSize:11,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",
+        <div style={{fontSize:12.5,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",
           letterSpacing:"0.08em",marginBottom:12}}>Institution</div>
         <Field label="Institution Name">
           <input value={form.institution} onChange={e=>setForm(f=>({...f,institution:e.target.value}))}/>
@@ -2312,7 +1866,7 @@ function SettingsTab({state,setState,toast}) {
 
       <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:16,marginBottom:16}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
-          <div style={{fontSize:11,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.08em"}}>
+          <div style={{fontSize:12.5,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.08em"}}>
             Time Slots
           </div>
           <Btn variant="outline" size="xs" onClick={addSlot}>+ Add Slot</Btn>
@@ -2324,35 +1878,35 @@ function SettingsTab({state,setState,toast}) {
               style={{width:110}}/>
             <input value={s.label} placeholder="Time (e.g. 09:00 – 12:00)"
               onChange={e=>setForm(f=>({...f,slots:f.slots.map((sl,j)=>j===i?{...sl,label:e.target.value}:sl)}))}/>
-            <Btn variant="danger" size="xs" onClick={()=>removeSlot(s.id)}>✕</Btn>
+            <Btn variant="danger" size="xs" onClick={()=>removeSlot(s.id)}>Remove</Btn>
           </div>
         ))}
       </div>
 
       <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:16,marginBottom:16}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
-          <div style={{fontSize:11,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.08em"}}>Holidays</div>
+          <div style={{fontSize:12.5,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.08em"}}>Holidays</div>
           <Btn variant="outline" size="xs" onClick={addHoliday}>+ Add Holiday</Btn>
         </div>
         {state.holidays.map(h=>(
           <div key={h.id} style={{display:"flex",gap:8,marginBottom:8,alignItems:"center"}}>
             <input type="date" value={h.date} onChange={e=>updateHoliday(h.id,"date",e.target.value)} style={{width:140}}/>
             <input value={h.name} placeholder="Holiday name" onChange={e=>updateHoliday(h.id,"name",e.target.value)}/>
-            <Btn variant="danger" size="xs" onClick={()=>removeHoliday(h.id)}>✕</Btn>
+            <Btn variant="danger" size="xs" onClick={()=>removeHoliday(h.id)}>Remove</Btn>
           </div>
         ))}
-        {!state.holidays.length&&<div style={{fontSize:11,color:"var(--muted2)"}}>No holidays defined</div>}
+        {!state.holidays.length&&<div style={{fontSize:12.5,color:"var(--muted2)"}}>No holidays defined</div>}
       </div>
 
       <Btn variant="primary" onClick={save} style={{marginBottom:20}}>Save Settings</Btn>
 
       <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:16}}>
-        <div style={{fontSize:11,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",
+        <div style={{fontSize:12.5,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",
           letterSpacing:"0.08em",marginBottom:12}}>Data Management</div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-          <Btn variant="outline" onClick={exportData}>↓ Export JSON</Btn>
+          <Btn variant="outline" onClick={exportData}><Icon name="download" size={15}/> Export JSON</Btn>
           <label style={{cursor:"pointer"}}>
-            <Btn variant="outline" as="span">↑ Import JSON</Btn>
+            <Btn variant="outline" as="span">Import JSON</Btn>
             <input type="file" accept=".json" onChange={importData} style={{display:"none"}}/>
           </label>
           <Btn variant="danger" onClick={resetData}>⟳ Reset to Defaults</Btn>
@@ -2362,1661 +1916,346 @@ function SettingsTab({state,setState,toast}) {
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  AUTO-SCHEDULE ENGINE
-// ═══════════════════════════════════════════════════════════════════
-
-// Instructor / group / room availability checks live in ./conflicts.js and understand
-// custom session times. This picks the first free room matching the optional filters.
-function findFreeRoom(appointments, rooms, dayIdx, timeId, weekNum, neededCapacity=0, preferType=null, slots=[]) {
-  const sorted=[...rooms].sort((a,b)=>{
-    const typeScore=(r)=>preferType&&r.type===preferType?-1:0;
-    return typeScore(a)-typeScore(b) || a.capacity-b.capacity;
-  });
-  return sorted.find(r =>
-    r.capacity>=neededCapacity && isRoomFree(appointments, r.id, weekNum, dayIdx, timeId, slots)
-  );
-}
-
-/**
- * runAutoSchedule: Core engine
- * jobs: array of { courseId, instructorId, groupIds, roomId?, weeks[], slotConstraints }
- * slotConstraints: array of { dayIdx, timeId } preferred slots (from instructor availability grid)
- * Returns { scheduled: [appt], skipped: [{ job, reason }] }
- */
-function runAutoSchedule(state, jobs) {
-  const { appointments, courses, rooms, instructors, slots } = state;
-  const working = { ...appointments }; // mutable copy for conflict tracking within run
-  const scheduled = [];
-  const skipped = [];
-
-  for (const job of jobs) {
-    const { courseId, instructorId, groupIds, preferredSlots, weeks, roomId, neededCapacity, preferRoomType } = job;
-    const course = courses.find(c => c.id === courseId);
-    if (!course) { skipped.push({ job, reason: "Course not found" }); continue; }
-
-    // Try each preferred slot in order
-    let placed = false;
-    for (const { dayIdx, timeId } of preferredSlots) {
-      // Check instructor free across ALL weeks
-      const instrFree = !instructorId || isInstructorFreeAllWeeks(working, instructorId, dayIdx, timeId, weeks, slots);
-      if (!instrFree) continue;
-      // Check all groups free across ALL weeks
-      const grpFree = !(groupIds||[]).length || areGroupsFreeAllWeeks(working, groupIds, dayIdx, timeId, weeks, slots);
-      if (!grpFree) continue;
-
-      // Find room for each week (may differ if roomId not locked)
-      const weekAppts = [];
-      let roomOk = true;
-      for (const wn of weeks) {
-        let rid = roomId;
-        if (!rid) {
-          // Estimate group size for capacity
-          const grpSize = Math.max(neededCapacity || 0, 1);
-          const room = findFreeRoom(working, rooms, dayIdx, timeId, wn, grpSize, preferRoomType, slots);
-          if (!room) { roomOk = false; break; }
-          rid = room.id;
-        } else {
-          // Check locked room is free
-          if (!isRoomFree(working, rid, wn, dayIdx, timeId, slots)) { roomOk = false; break; }
-        }
-        const id = uid();
-        const appt = { id, weekNum:wn, dayIdx, timeId, courseId, courseName:course.name,
-          courseCode:course.code, instructorId:instructorId||"", roomId:rid, groupIds:[...groupIds], notes:"" };
-        weekAppts.push(appt);
-        working[id] = appt; // lock into working copy
-      }
-
-      if (roomOk && weekAppts.length === weeks.length) {
-        scheduled.push(...weekAppts);
-        placed = true;
-        break;
-      } else {
-        // Rollback this slot attempt
-        weekAppts.forEach(a => delete working[a.id]);
-      }
-    }
-
-    if (!placed) {
-      skipped.push({ job, reason: "No conflict-free slot found for all selected weeks" });
-    }
-  }
-  return { scheduled, skipped };
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  AVAILABILITY GRID EDITOR
-// Used inside InstructorEditor in Assets AND in AutoScheduleTab
-// ═══════════════════════════════════════════════════════════════════
-function AvailabilityGrid({ availability={}, onChange, slots, compact=false }) {
-  function toggle(di, timeId) {
-    const cur = availability[di] || [];
-    const next = cur.includes(timeId) ? cur.filter(x=>x!==timeId) : [...cur, timeId];
-    onChange({ ...availability, [di]: next });
-  }
-  function toggleDay(di) {
-    const cur = availability[di] || [];
-    const all = slots.map(s=>s.id);
-    onChange({ ...availability, [di]: cur.length===all.length ? [] : [...all] });
-  }
-  function toggleSlot(timeId) {
-    const next={};
-    DAYS.forEach((_,di)=>{
-      const cur=availability[di]||[];
-      const allHave=DAYS.every((__,d)=>(availability[d]||[]).includes(timeId));
-      next[di]=allHave?cur.filter(x=>x!==timeId):[...new Set([...cur,timeId])];
-    });
-    onChange(next);
-  }
-
-  return (
-    <div style={{overflowX:"auto"}}>
-      <table style={{borderCollapse:"separate",borderSpacing:3,minWidth:compact?280:340}}>
-        <thead>
-          <tr>
-            <th style={{width:compact?70:90,fontSize:9,color:"var(--muted)",fontWeight:600,
-              textTransform:"uppercase",letterSpacing:"0.06em",textAlign:"left",paddingBottom:4}}/>
-            {DAYS.map((d,di)=>(
-              <th key={di} style={{textAlign:"center",padding:"2px 4px"}}>
-                <div onClick={()=>toggleDay(di)}
-                  style={{fontSize:9,fontWeight:600,color:"var(--muted)",cursor:"pointer",
-                    padding:"3px 6px",borderRadius:"var(--r)",
-                    background:(availability[di]||[]).length===slots.length?"var(--bg4)":"transparent",
-                    userSelect:"none"}}
-                  title={`Toggle all ${DAYS_FULL[di]}`}>
-                  {compact?d.slice(0,1):d}
-                </div>
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {slots.map(slot=>(
-            <tr key={slot.id}>
-              <td style={{paddingRight:6}}>
-                <div onClick={()=>toggleSlot(slot.id)}
-                  style={{fontSize:9,color:"var(--muted)",cursor:"pointer",
-                    fontFamily:"var(--mono)",userSelect:"none",whiteSpace:"nowrap"}}>
-                  {compact?slot.short.slice(0,3):slot.short}
-                </div>
-              </td>
-              {DAYS.map((_,di)=>{
-                const on=(availability[di]||[]).includes(slot.id);
-                return (
-                  <td key={di} style={{textAlign:"center"}}>
-                    <div onClick={()=>toggle(di,slot.id)}
-                      style={{width:compact?24:30,height:compact?22:26,borderRadius:4,cursor:"pointer",
-                        display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto",
-                        background:on?"rgba(5,150,105,0.15)":"var(--bg3)",
-                        border:`1px solid ${on?"rgba(110,231,183,0.5)":"var(--border)"}`,
-                        transition:"all 0.1s",userSelect:"none"}}>
-                      {on&&<span style={{fontSize:8,color:"var(--accent)",fontWeight:700}}>✓</span>}
-                    </div>
-                  </td>
-                );
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  AUTO-SCHEDULE TAB
-// ═══════════════════════════════════════════════════════════════════
-function AutoScheduleTab({ state, setState, toast }) {
-  const { courses, instructors, groups, rooms, appointments, slots } = state;
-
-  // ── Step state ──────────────────────────────────────────────────
-  const [step, setStep] = useState(0); // 0=setup, 1=review, 2=done
-  const STEPS = ["Configure Jobs", "Review & Confirm", "Results"];
-
-  // ── Job builder state ────────────────────────────────────────────
-  const blankJob = () => ({
-    id: uid(), courseId:"", instructorId:"", groupIds:[], roomId:"",
-    neededCapacity:0, preferRoomType:"",
-    weeksMode:"all",  // "all" | "range" | "custom"
-    weekStart:1, weekEnd:16, customWeeks:[],
-    useInstructorAvailability:true,
-    customSlots:[],   // [{dayIdx,timeId}] extra overrides
-    _open:true,
-  });
-  const [jobs, setJobs] = useState([blankJob()]);
-  const [result, setResult] = useState(null);  // {scheduled, skipped}
-  const [running, setRunning] = useState(false);
-
-  function updateJob(id, patch) {
-    // Intercept instructor availability updates and forward to global state
-    if(patch._instrAvailUpdate) {
-      const {instrId,avail}=patch._instrAvailUpdate;
-      setState(s=>({...s,
-        instructors:s.instructors.map(i=>i.id===instrId?{...i,availability:avail}:i)
-      }));
-      const {_instrAvailUpdate,...rest}=patch;
-      if(Object.keys(rest).length) setJobs(j=>j.map(job=>job.id===id?{...job,...rest}:job));
-      return;
-    }
-    setJobs(j => j.map(job => job.id===id ? {...job,...patch} : job));
-  }
-  function addJob() { setJobs(j=>[...j, blankJob()]); }
-  function removeJob(id) { setJobs(j=>j.filter(x=>x.id!==id)); }
-  function toggleJob(id) { updateJob(id,{_open:!jobs.find(j=>j.id===id)?._open}); }
-
-  // Derive weeks array for a job
-  function getJobWeeks(job) {
-    if(job.weeksMode==="all") return Array.from({length:16},(_,i)=>i+1);
-    if(job.weeksMode==="range") {
-      const arr=[];
-      for(let w=job.weekStart;w<=job.weekEnd;w++) arr.push(w);
-      return arr;
-    }
-    return job.customWeeks.length?job.customWeeks:Array.from({length:16},(_,i)=>i+1);
-  }
-
-  // Derive preferred slots for a job
-  function getJobSlots(job) {
-    const instr = instructors.find(i=>i.id===job.instructorId);
-    const avail = instr?.availability || {};
-    const instrSlots = [];
-    if(job.useInstructorAvailability && instr) {
-      DAYS.forEach((_,di)=>{
-        (avail[di]||[]).forEach(timeId=>instrSlots.push({dayIdx:di,timeId}));
-      });
-    } else {
-      // All slots if not using availability filter
-      DAYS.forEach((_,di)=>slots.forEach(s=>instrSlots.push({dayIdx:di,timeId:s.id})));
-    }
-    // Merge custom slots (union)
-    const extra = job.customSlots.filter(cs =>
-      !instrSlots.some(s=>s.dayIdx===cs.dayIdx&&s.timeId===cs.timeId)
-    );
-    return [...instrSlots,...extra];
-  }
-
-  function buildPreview() {
-    return jobs.map(job=>{
-      const course=courses.find(c=>c.id===job.courseId);
-      const instr=instructors.find(i=>i.id===job.instructorId);
-      const weeks=getJobWeeks(job);
-      const slots_=getJobSlots(job);
-      return {job,course,instr,weeks,slots_};
-    });
-  }
-
-  function handleRun() {
-    setRunning(true);
-    setTimeout(()=>{
-      const engineJobs=jobs.map(job=>({
-        ...job,
-        weeks:getJobWeeks(job),
-        preferredSlots:getJobSlots(job),
-      }));
-      const res=runAutoSchedule(state,engineJobs);
-      setResult(res);
-      setStep(2);
-      setRunning(false);
-    },400);
-  }
-
-  function handleCommit() {
-    if(!result?.scheduled?.length) return;
-    setState(s=>{
-      const next={...s.appointments};
-      result.scheduled.forEach(a=>{next[a.id]=a;});
-      return {...s,
-        appointments:next,
-        changelog:[...s.changelog.slice(-199),{
-          at:Date.now(),
-          action:"Auto-scheduled",
-          detail:`${result.scheduled.length} sessions across ${[...new Set(result.scheduled.map(a=>a.courseId))].length} course(s)`,
-        }],
-      };
-    });
-    toast(`${result.scheduled.length} sessions auto-scheduled!`,"ok");
-    setStep(0);
-    setJobs([blankJob()]);
-    setResult(null);
-  }
-
-  // ── Render helpers ───────────────────────────────────────────────
-  const preview=useMemo(()=>buildPreview(),[jobs,instructors,courses]);
-
-  // Count conflict-free slots for a job (for preview badge)
-  function countFeasible(job) {
-    const weeks=getJobWeeks(job);
-    const slts=getJobSlots(job);
-    const instr=instructors.find(i=>i.id===job.instructorId);
-    const grps=job.groupIds||[];
-    return slts.filter(({dayIdx,timeId})=>{
-      const instrOk=!instr||isInstructorFreeAllWeeks(appointments,instr.id,dayIdx,timeId,weeks,slots);
-      const grpOk=!grps.length||areGroupsFreeAllWeeks(appointments,grps,dayIdx,timeId,weeks,slots);
-      return instrOk&&grpOk;
-    }).length;
-  }
-
-  // ── Step: Setup ──────────────────────────────────────────────────
-  if(step===0) return (
-    <div style={{display:"flex",flexDirection:"column",height:"100%"}}>
-      {/* Header */}
-      <div style={{padding:"12px 16px",borderBottom:"1px solid var(--border)",flexShrink:0,
-        display:"flex",alignItems:"center",gap:10}}>
-        <div>
-          <div style={{fontSize:14,fontWeight:700}}>Auto-Schedule</div>
-          <div style={{fontSize:11,color:"var(--muted)",marginTop:1}}>
-            Define scheduling jobs — the engine finds conflict-free slots automatically
-          </div>
-        </div>
-        <div style={{flex:1}}/>
-        <Btn variant="outline" onClick={addJob}>+ Add Job</Btn>
-        <Btn variant="accent" onClick={()=>setStep(1)}
-          disabled={jobs.every(j=>!j.courseId)}>
-          Review →
-        </Btn>
-      </div>
-
-      {/* Steps indicator */}
-      <div style={{padding:"8px 16px",borderBottom:"1px solid var(--border)",flexShrink:0,
-        display:"flex",gap:6,alignItems:"center"}}>
-        {STEPS.map((s,i)=>(
-          <div key={i} style={{display:"flex",alignItems:"center",gap:6}}>
-            <div style={{width:20,height:20,borderRadius:"50%",display:"flex",alignItems:"center",
-              justifyContent:"center",fontSize:9,fontWeight:700,
-              background:step===i?"var(--accent)":step>i?"rgba(5,150,105,0.15)":"var(--bg4)",
-              color:step===i?"#ffffff":step>i?"var(--accent)":"var(--muted)"}}>
-              {step>i?"✓":i+1}
-            </div>
-            <span style={{fontSize:10,color:step===i?"var(--text)":"var(--muted)",fontWeight:step===i?600:400}}>
-              {s}
-            </span>
-            {i<STEPS.length-1&&<span style={{color:"var(--muted2)",fontSize:10}}>›</span>}
-          </div>
-        ))}
-      </div>
-
-      {/* Job list */}
-      <div style={{flex:1,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",padding:12,display:"flex",flexDirection:"column",gap:10}}>
-        {jobs.map((job,ji)=>(
-          <JobCard key={job.id} job={job} ji={ji}
-            courses={courses} instructors={instructors} groups={groups}
-            rooms={rooms} slots={slots} state={state}
-            onUpdate={(patch)=>updateJob(job.id,patch)}
-            onRemove={()=>removeJob(job.id)}
-            onToggle={()=>toggleJob(job.id)}
-            feasible={job.courseId?countFeasible(job):null}
-            appointments={appointments}
-          />
-        ))}
-        <button onClick={addJob}
-          style={{border:"1px dashed var(--border2)",borderRadius:"var(--r2)",padding:"14px",
-            background:"transparent",color:"var(--muted)",fontSize:11,cursor:"pointer",
-            fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
-          + Add Another Scheduling Job
-        </button>
-      </div>
-    </div>
-  );
-
-  // ── Step: Review ─────────────────────────────────────────────────
-  if(step===1) return (
-    <div style={{display:"flex",flexDirection:"column",height:"100%"}}>
-      <div style={{padding:"12px 16px",borderBottom:"1px solid var(--border)",flexShrink:0,
-        display:"flex",alignItems:"center",gap:10}}>
-        <Btn variant="outline" onClick={()=>setStep(0)}>← Back</Btn>
-        <div style={{flex:1}}>
-          <div style={{fontSize:14,fontWeight:700}}>Review Jobs</div>
-          <div style={{fontSize:11,color:"var(--muted)"}}>Confirm before running the scheduler</div>
-        </div>
-        <Btn variant="primary" onClick={handleRun} disabled={running}
-          style={{minWidth:120,justifyContent:"center"}}>
-          {running?<span style={{animation:"pulse 1s infinite"}}>Running…</span>:"⚡ Run Scheduler"}
-        </Btn>
-      </div>
-      <div style={{flex:1,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",padding:16,display:"flex",flexDirection:"column",gap:10}}>
-        {preview.map(({job,course,instr,weeks,slots_},i)=>{
-          if(!course) return null;
-          const pal=PALETTE.find(p=>p.id===course.colorId)||PALETTE[0];
-          const grpNames=(job.groupIds||[]).map(g=>groups.find(x=>x.id===g)?.name).filter(Boolean);
-          const feasible=countFeasible(job);
-          return (
-            <div key={job.id} style={{background:"var(--bg2)",border:`1px solid ${pal.border}`,
-              borderRadius:"var(--r2)",padding:"14px 16px"}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-                <span style={{width:8,height:8,borderRadius:"50%",background:pal.accent}}/>
-                <span style={{fontSize:9,fontFamily:"var(--mono)",fontWeight:700,color:pal.accent}}>{course.code}</span>
-                <span style={{fontSize:12,fontWeight:600}}>{course.name}</span>
-                <div style={{marginLeft:"auto",display:"flex",gap:6}}>
-                  <Badge color={feasible>0?"green":"red"}>{feasible} feasible slot{feasible!==1?"s":""}</Badge>
-                  <Badge color="muted">{weeks.length} week{weeks.length!==1?"s":""}</Badge>
-                </div>
-              </div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))",gap:6}}>
-                {[
-                  ["Instructor", instr?.name||"—"],
-                  ["Groups", grpNames.join(", ")||"—"],
-                  ["Preferred slots", slots_.length+" options"],
-                  ["Weeks", weeks.length===16?"All 16":weeks.length===1?`Week ${weeks[0]}`:`W${weeks[0]}–W${weeks[weeks.length-1]}`],
-                ].map(([k,v])=>(
-                  <div key={k} style={{background:"var(--bg3)",borderRadius:"var(--r)",padding:"7px 10px"}}>
-                    <div style={{fontSize:9,color:"var(--muted)",textTransform:"uppercase",
-                      letterSpacing:"0.08em",fontWeight:600,marginBottom:2}}>{k}</div>
-                    <div style={{fontSize:11,color:"var(--text)",fontWeight:500}}>{v}</div>
-                  </div>
-                ))}
-              </div>
-              {/* Slot preview */}
-              {slots_.length>0&&(
-                <div style={{marginTop:10}}>
-                  <div style={{fontSize:9,color:"var(--muted)",textTransform:"uppercase",
-                    letterSpacing:"0.08em",fontWeight:600,marginBottom:6}}>Preferred Slots</div>
-                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-                    {slots_.slice(0,20).map((s,si)=>(
-                      <span key={si} style={{fontSize:9,fontFamily:"var(--mono)",
-                        padding:"2px 7px",borderRadius:99,
-                        background:"var(--bg4)",color:"var(--muted)",
-                        border:"1px solid var(--border)"}}>
-                        {DAYS[s.dayIdx]} {s.timeId.toUpperCase()}
-                      </span>
-                    ))}
-                    {slots_.length>20&&<span style={{fontSize:9,color:"var(--muted2)"}}>+{slots_.length-20} more</span>}
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-
-  // ── Step: Results ─────────────────────────────────────────────────
-  if(step===2) return (
-    <div style={{display:"flex",flexDirection:"column",height:"100%"}}>
-      <div style={{padding:"12px 16px",borderBottom:"1px solid var(--border)",flexShrink:0,
-        display:"flex",alignItems:"center",gap:10}}>
-        <Btn variant="outline" onClick={()=>{setStep(0);setResult(null);}}>← Start Over</Btn>
-        <div style={{flex:1}}>
-          <div style={{fontSize:14,fontWeight:700}}>Scheduler Results</div>
-          <div style={{fontSize:11,color:"var(--muted)"}}>
-            {result?.scheduled?.length||0} sessions ready · {result?.skipped?.length||0} skipped
-          </div>
-        </div>
-        {result?.scheduled?.length>0&&(
-          <Btn variant="primary" onClick={handleCommit} style={{minWidth:130,justifyContent:"center"}}>
-            ✓ Commit to Schedule
-          </Btn>
-        )}
-      </div>
-      <div style={{flex:1,overflowY:"auto",padding:16,minHeight:0,WebkitOverflowScrolling:"touch"}}>
-        {/* Summary */}
-        <div style={{display:"flex",gap:10,marginBottom:20,flexWrap:"wrap"}}>
-          {[
-            {label:"Scheduled",value:result?.scheduled?.length||0,color:"green"},
-            {label:"Skipped",value:result?.skipped?.length||0,color:result?.skipped?.length?"red":"muted"},
-            {label:"Unique Courses",value:[...new Set((result?.scheduled||[]).map(a=>a.courseId))].length,color:"muted"},
-            {label:"Weeks Covered",value:[...new Set((result?.scheduled||[]).map(a=>a.weekNum))].length,color:"muted"},
-          ].map(({label,value,color})=>(
-            <div key={label} style={{background:"var(--bg2)",border:"1px solid var(--border)",
-              borderRadius:"var(--r2)",padding:"12px 16px",flex:1,minWidth:100}}>
-              <div style={{fontSize:9,color:"var(--muted)",textTransform:"uppercase",
-                letterSpacing:"0.08em",fontWeight:600,marginBottom:4}}>{label}</div>
-              <div style={{fontSize:22,fontWeight:700,fontFamily:"var(--mono)",
-                color:color==="green"?"var(--accent)":color==="red"?"var(--danger)":"var(--text)"}}>
-                {value}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* Scheduled sessions grouped by course */}
-        {result?.scheduled?.length>0&&(
-          <div style={{marginBottom:20}}>
-            <div style={{fontSize:11,fontWeight:700,textTransform:"uppercase",
-              letterSpacing:"0.08em",color:"var(--accent)",marginBottom:10}}>
-              ✓ Sessions to be Added
-            </div>
-            {Object.entries(
-              (result.scheduled||[]).reduce((acc,a)=>{
-                if(!acc[a.courseId]) acc[a.courseId]=[];
-                acc[a.courseId].push(a); return acc;
-              },{})
-            ).map(([courseId,appts])=>{
-              const course=courses.find(c=>c.id===courseId);
-              const pal=PALETTE.find(p=>p.id===course?.colorId)||PALETTE[0];
-              return (
-                <div key={courseId} style={{background:"var(--bg2)",border:`1px solid ${pal.border}`,
-                  borderRadius:"var(--r2)",padding:"12px 14px",marginBottom:10}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-                    <span style={{width:6,height:6,borderRadius:"50%",background:pal.accent}}/>
-                    <span style={{fontSize:9,fontFamily:"var(--mono)",fontWeight:700,color:pal.accent}}>{course?.code}</span>
-                    <span style={{fontSize:12,fontWeight:600}}>{course?.name}</span>
-                    <Badge color="green" style={{marginLeft:"auto"}}>{appts.length} session{appts.length!==1?"s":""}</Badge>
-                  </div>
-                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-                    {appts.sort((a,b)=>a.weekNum-b.weekNum||a.dayIdx-b.dayIdx).map(a=>{
-                      const room=rooms.find(r=>r.id===a.roomId);
-                      return (
-                        <div key={a.id} style={{fontSize:9,fontFamily:"var(--mono)",
-                          padding:"3px 8px",borderRadius:4,background:"var(--bg3)",
-                          border:"1px solid var(--border)",color:"var(--muted)"}}>
-                          W{a.weekNum} {DAYS[a.dayIdx]} {a.timeId.toUpperCase()}
-                          {room?` · ${room.name}`:""}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* Skipped */}
-        {result?.skipped?.length>0&&(
-          <div>
-            <div style={{fontSize:11,fontWeight:700,textTransform:"uppercase",
-              letterSpacing:"0.08em",color:"var(--danger)",marginBottom:10}}>
-              ✗ Skipped Jobs
-            </div>
-            {result.skipped.map(({job,reason},i)=>{
-              const course=courses.find(c=>c.id===job.courseId);
-              const pal=PALETTE.find(p=>p.id===course?.colorId)||PALETTE[0];
-              return (
-                <div key={i} style={{background:"rgba(248,113,113,0.06)",
-                  border:"1px solid rgba(248,113,113,0.2)",borderRadius:"var(--r2)",
-                  padding:"10px 14px",marginBottom:8,display:"flex",alignItems:"center",gap:10}}>
-                  <div style={{flex:1}}>
-                    <div style={{fontSize:11,fontWeight:500,color:"var(--text)"}}>
-                      {course?.name||"Unknown course"}
-                    </div>
-                    <div style={{fontSize:10,color:"var(--danger)",marginTop:2}}>{reason}</div>
-                  </div>
-                  <Badge color="red">Skipped</Badge>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── Job Card (single scheduling job editor) ───────────────────────
-function JobCard({ job, ji, courses, instructors, groups, rooms, slots, state, onUpdate, onRemove, onToggle, feasible, appointments }) {
-  const course=courses.find(c=>c.id===job.courseId);
-  const instr=instructors.find(i=>i.id===job.instructorId);
-  const pal=course?PALETTE.find(p=>p.id===course.colorId)||PALETTE[0]:null;
-
-  // When course changes, auto-fill instructor and groups from defaults
-  function handleCourseChange(courseId) {
-    const c=courses.find(x=>x.id===courseId);
-    onUpdate({
-      courseId,
-      instructorId:c?.defaultInstructorId||"",
-      groupIds:c?.defaultGroupIds||[],
-    });
-  }
-
-  // Custom weeks multi-select
-  const allWeeks=Array.from({length:16},(_,i)=>i+1);
-
-  // Compute which slots are free right now (for the availability grid highlight)
-  const weeks_=useMemo(()=>{
-    if(job.weeksMode==="all") return allWeeks;
-    if(job.weeksMode==="range"){const a=[];for(let w=job.weekStart;w<=job.weekEnd;w++)a.push(w);return a;}
-    return job.customWeeks.length?job.customWeeks:allWeeks;
-  },[job.weeksMode,job.weekStart,job.weekEnd,job.customWeeks]);
-
-  // Slot conflict matrix: for each {dayIdx,timeId}, is it free?
-  const slotMatrix=useMemo(()=>{
-    const m={};
-    DAYS.forEach((_,di)=>{
-      slots.forEach(s=>{
-        const instrOk=!instr||isInstructorFreeAllWeeks(appointments,instr.id,di,s.id,weeks_,slots);
-        const grpOk=!(job.groupIds||[]).length||areGroupsFreeAllWeeks(appointments,job.groupIds,di,s.id,weeks_,slots);
-        m[`${di}_${s.id}`]={instrOk,grpOk,free:instrOk&&grpOk};
-      });
-    });
-    return m;
-  },[instr,job.groupIds,appointments,weeks_,slots]);
-
-  return (
-    <div style={{background:"var(--bg2)",border:`1px solid ${pal?pal.border:"var(--border2)"}`,
-      borderRadius:"var(--r2)",overflow:"hidden"}}>
-      {/* Header row */}
-      <div onClick={onToggle}
-        style={{padding:"10px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:10,
-          borderBottom:job._open?"1px solid var(--border)":"none",
-          background:job._open?"var(--bg3)":"transparent"}}>
-        <span style={{fontSize:11,fontWeight:700,color:"var(--muted2)",fontFamily:"var(--mono)",width:18}}>
-          {ji+1}.
-        </span>
-        {pal&&<span style={{width:7,height:7,borderRadius:"50%",background:pal.accent,flexShrink:0}}/>}
-        <span style={{fontSize:12,fontWeight:600,flex:1,color:"var(--text)"}}>
-          {course?`[${course.code}] ${course.name}`:"New Job — select a course"}
-        </span>
-        {feasible!==null&&(
-          <Badge color={feasible>0?"green":"red"}>{feasible} slot{feasible!==1?"s":""}</Badge>
-        )}
-        <Btn variant="ghost" size="xs" onClick={e=>{e.stopPropagation();onRemove();}}
-          style={{color:"var(--muted2)"}}>✕</Btn>
-        <span style={{color:"var(--muted2)",fontSize:10}}>{job._open?"▲":"▼"}</span>
-      </div>
-
-      {!job._open&&<div style={{height:4}}/>}
-
-      {job._open&&(
-        <div style={{padding:"14px 14px 16px"}}>
-          {/* Course */}
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
-            <Field label="Course" required>
-              <select value={job.courseId} onChange={e=>handleCourseChange(e.target.value)}>
-                <option value="">— Select course —</option>
-                {courses.map(c=><option key={c.id} value={c.id}>[{c.code}] {c.name}</option>)}
-              </select>
-            </Field>
-            <Field label="Instructor">
-              <select value={job.instructorId} onChange={e=>onUpdate({instructorId:e.target.value})}>
-                <option value="">— None —</option>
-                {instructors.map(i=><option key={i.id} value={i.id}>{i.name}</option>)}
-              </select>
-            </Field>
-          </div>
-
-          {/* Groups */}
-          <Field label="Student Groups" hint="Scheduler checks these groups have no clashes">
-            <MultiSelect
-              options={groups.map(g=>({value:g.id,label:g.name}))}
-              value={job.groupIds}
-              onChange={v=>onUpdate({groupIds:v})}
-              placeholder="Select groups to check availability..."/>
-          </Field>
-
-          {/* Room */}
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
-            <Field label="Lock Room (optional)" hint="Leave blank for auto-assign">
-              <select value={job.roomId} onChange={e=>onUpdate({roomId:e.target.value})}>
-                <option value="">— Auto-assign —</option>
-                {rooms.map(r=><option key={r.id} value={r.id}>{r.name} ({r.capacity})</option>)}
-              </select>
-            </Field>
-            <Field label="Prefer Room Type">
-              <select value={job.preferRoomType} onChange={e=>onUpdate({preferRoomType:e.target.value})}>
-                <option value="">— Any —</option>
-                {["lecture","seminar","lab","studio","online"].map(t=><option key={t}>{t}</option>)}
-              </select>
-            </Field>
-          </div>
-
-          {/* Weeks */}
-          <Field label="Weeks to Schedule">
-            <div style={{display:"flex",gap:6,marginBottom:8}}>
-              {[["all","All 16 Weeks"],["range","Date Range"],["custom","Pick Weeks"]].map(([v,l])=>(
-                <Btn key={v} variant={job.weeksMode===v?"accent":"outline"} size="xs"
-                  onClick={()=>onUpdate({weeksMode:v})}>
-                  {l}
-                </Btn>
-              ))}
-            </div>
-            {job.weeksMode==="range"&&(
-              <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                <select value={job.weekStart} onChange={e=>onUpdate({weekStart:+e.target.value})} style={{width:110}}>
-                  {allWeeks.map(w=><option key={w} value={w}>Week {w}</option>)}
-                </select>
-                <span style={{color:"var(--muted)",fontSize:11}}>to</span>
-                <select value={job.weekEnd} onChange={e=>onUpdate({weekEnd:+e.target.value})} style={{width:110}}>
-                  {allWeeks.filter(w=>w>=job.weekStart).map(w=><option key={w} value={w}>Week {w}</option>)}
-                </select>
-              </div>
-            )}
-            {job.weeksMode==="custom"&&(
-              <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-                {allWeeks.map(w=>{
-                  const on=job.customWeeks.includes(w);
-                  return (
-                    <button key={w} onClick={()=>onUpdate({customWeeks:on?job.customWeeks.filter(x=>x!==w):[...job.customWeeks,w].sort((a,b)=>a-b)})}
-                      style={{width:36,height:28,borderRadius:"var(--r)",fontSize:10,
-                        fontFamily:"var(--mono)",cursor:"pointer",border:"none",fontWeight:500,
-                        background:on?"rgba(5,150,105,0.15)":"var(--bg4)",
-                        color:on?"var(--accent)":"var(--muted)",
-                        outline:on?"1px solid rgba(110,231,183,0.4)":"none"}}>
-                      W{w}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </Field>
-
-          {/* Availability section */}
-          <div style={{marginTop:4}}>
-            <div style={{fontSize:10,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",
-              letterSpacing:"0.08em",marginBottom:8,display:"flex",alignItems:"center",gap:8}}>
-              Slot Availability
-              {instr&&(
-                <label style={{display:"flex",alignItems:"center",gap:5,cursor:"pointer",
-                  fontWeight:400,textTransform:"none",letterSpacing:"normal",color:"var(--text)"}}>
-                  <input type="checkbox" checked={job.useInstructorAvailability}
-                    onChange={e=>onUpdate({useInstructorAvailability:e.target.checked})}/>
-                  Use {instr.name.split(" ").slice(-1)[0]}'s availability
-                </label>
-              )}
-            </div>
-
-            {/* Slot conflict matrix */}
-            <div style={{background:"var(--bg3)",borderRadius:"var(--r)",padding:10,
-              border:"1px solid var(--border)",marginBottom:8}}>
-              <div style={{fontSize:9,color:"var(--muted)",marginBottom:6}}>
-                Slot availability across weeks {weeks_.length===16?"1–16":`(${weeks_.length} selected)`} · 
-                green = free for instructor + groups · red = conflict
-              </div>
-              <table style={{borderCollapse:"separate",borderSpacing:3,width:"100%"}}>
-                <thead>
-                  <tr>
-                    <th style={{width:70,textAlign:"left",fontSize:9,color:"var(--muted2)",fontWeight:400}}/>
-                    {DAYS.map((d,di)=>(
-                      <th key={di} style={{textAlign:"center",fontSize:9,color:"var(--muted)",fontWeight:600,paddingBottom:4}}>{d}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {slots.map(slot=>(
-                    <tr key={slot.id}>
-                      <td style={{fontSize:9,color:"var(--muted)",fontFamily:"var(--mono)",paddingRight:6}}>
-                        {slot.short}
-                      </td>
-                      {DAYS.map((_,di)=>{
-                        const key=`${di}_${slot.id}`;
-                        const info=slotMatrix[key]||{free:true,instrOk:true,grpOk:true};
-                        const instrAvail=instr?(instr.availability?.[di]||[]).includes(slot.id):true;
-                        const used=job.useInstructorAvailability&&instr&&!instrAvail;
-                        return (
-                          <td key={di} style={{textAlign:"center"}}>
-                            <div title={
-                              used?"Not in instructor availability":
-                              !info.instrOk?"Instructor has class":
-                              !info.grpOk?"Group has class":"Available"
-                            } style={{width:28,height:22,borderRadius:4,margin:"0 auto",
-                              display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,
-                              background:used?"var(--bg4)":info.free?"rgba(5,150,105,0.10)":"rgba(248,113,113,0.12)",
-                              border:`1px solid ${used?"var(--border)":info.free?"rgba(5,150,105,0.30)":"rgba(248,113,113,0.3)"}`,
-                              color:used?"var(--muted2)":info.free?"var(--accent)":"var(--danger)"}}>
-                              {used?"—":info.free?"✓":(!info.instrOk&&!info.grpOk?"✗I+G":!info.instrOk?"✗I":"✗G")}
-                            </div>
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <div style={{display:"flex",gap:12,marginTop:8,fontSize:9,color:"var(--muted)"}}>
-                <span>✓ Free &nbsp;</span>
-                <span style={{color:"var(--danger)"}}>✗I Instructor busy &nbsp;</span>
-                <span style={{color:"var(--danger)"}}>✗G Group busy &nbsp;</span>
-                <span>— Not available</span>
-              </div>
-            </div>
-
-            {/* Instructor availability editor shortcut */}
-            {instr&&(
-              <div style={{background:"var(--bg3)",borderRadius:"var(--r)",padding:10,
-                border:"1px solid var(--border)"}}>
-                <div style={{fontSize:9,color:"var(--muted)",fontWeight:600,
-                  textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8,
-                  display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-                  <span>{instr.name} — Weekly Availability</span>
-                  <span style={{fontWeight:400,textTransform:"none",letterSpacing:"normal",
-                    color:"var(--muted2)"}}>Click to edit · used by scheduler</span>
-                </div>
-                <AvailabilityGrid
-                  availability={instr.availability||{}}
-                  onChange={(avail)=>{
-                    // Update the instructor availability in global state
-                    // We receive setState via props in AutoScheduleTab, pass it up via onUpdate
-                    onUpdate({_instrAvailUpdate:{instrId:instr.id,avail}});
-                  }}
-                  slots={slots}
-                  compact={true}
-                />
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
 
 
 // ═══════════════════════════════════════════════════════════════════
-//  COLLABORATION HOOK
-//  Per-item sync: every local change is diffed against the previous state and
-//  only the changed items are written (see sync.js). Remote changes arrive
-//  through live Firebase listeners - no polling, no whole-timetable overwrite,
-//  and deletions propagate.
-// ═══════════════════════════════════════════════════════════════════
-const PRESENCE_STALE_MS = 60000;
-const BACKUP_PREFIX = "kronos_backup_";
-
-// Keep a safety copy of local data before it is replaced (joining a room, adopting the cloud copy).
-function backupLocalState(state, reason) {
-  try {
-    localStorage.setItem(BACKUP_PREFIX + Date.now(), JSON.stringify({ reason, state }));
-    Object.keys(localStorage).filter(k => k.startsWith(BACKUP_PREFIX)).sort().slice(0, -3)
-      .forEach(k => localStorage.removeItem(k)); // keep the 3 most recent
-  } catch {}
-}
-
-function useCollaboration({ getState, applyRemote, toast }) {
-  const [session, setSession] = useState(null);
-  const [rawPresence, setRawPresence] = useState({});
-  const [tick, setTick] = useState(0);
-  const [syncing, setSyncing] = useState(false);
-  const [lastSyncAt, setLastSyncAt] = useState(null);
-  const sessionRef = useRef(null);
-  const cleanupRef = useRef([]);
-  const presenceCtl = useRef(null);
-  const lastToastAt = useRef(0);
-  const clientRef = useRef(null);
-
-  if (!clientRef.current) {
-    clientRef.current = createRoomClient({
-      api: { ensureAuth, loadRoom, writeRoomTree, updateRoom, subscribeRoom, pushOp },
-      getState, applyRemote, sanitize: sanitizeState,
-      callbacks: {
-        onRemoteChange: () => {
-          const t = Date.now();
-          if (t - lastToastAt.current > 8000) { lastToastAt.current = t; toast("Schedule updated by a collaborator", "info"); }
-        },
-        onSyncing: setSyncing,
-        onSynced: () => setLastSyncAt(Date.now()),
-        onError: msg => toast(msg, "warn"),
-        backup: backupLocalState,
-      },
-    });
-  }
-  const client = clientRef.current;
-
-  async function joinRoom(code, userName, isOwner) {
-    const sess = { roomCode: code, userId: uid(), userName, userColor: userColor(Math.floor(Math.random() * USER_COLORS.length)), isOwner };
-    await client.join(code, { userId: sess.userId, userName }, isOwner); // throws if the room can't be opened
-    sessionRef.current = sess; setSession(sess);
-    cleanupRef.current.push(subscribePresence(code, setRawPresence));
-    presenceCtl.current = joinPresence(code, sess.userId, { name: userName, color: sess.userColor, tab: "schedule", editing: null });
-    const t = setInterval(() => setTick(x => x + 1), 15000); // re-evaluate who is stale
-    cleanupRef.current.push(() => clearInterval(t));
-    rememberRoom(code);
-    return sess;
-  }
-
-  async function leaveRoom() {
-    client.leave();
-    cleanupRef.current.forEach(fn => { try { fn(); } catch {} });
-    cleanupRef.current = [];
-    try { await presenceCtl.current?.leave(); } catch {}
-    presenceCtl.current = null; sessionRef.current = null;
-    setSession(null); setRawPresence({});
-  }
-
-  const pushDiff = (prev, next, opType, opDetail) => client.pushDiff(prev, next, opType, opDetail);
-  const setPresenceFields = fields => presenceCtl.current?.update(fields);
-
-  const presence = useMemo(() => {
-    const now = Date.now(), out = {};
-    Object.entries(rawPresence || {}).forEach(([id, p]) => { if (p && now - (p.at || 0) < PRESENCE_STALE_MS) out[id] = p; });
-    return out;
-  }, [rawPresence, tick]);
-
-  useEffect(() => () => { // leave cleanly if the component unmounts
-    client.leave();
-    cleanupRef.current.forEach(fn => { try { fn(); } catch {} });
-    presenceCtl.current?.leave();
-  }, []);
-
-  return { session, presence, syncing, lastSyncAt, joinRoom, leaveRoom, pushDiff, setPresenceFields };
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  COLLAB MODAL
-// ═══════════════════════════════════════════════════════════════════
-function CollabModal({ onJoin, onClose, defaultName }) {
-  const [mode, setMode] = useState("pick");
-  const [roomName, setRoomName] = useState("");
-  const [joinCode, setJoinCode] = useState("");
-  const [userName, setUserName] = useState(auth.currentUser?.displayName||defaultName||"");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [knownRooms] = useState(loadRecentRooms); // only rooms this browser has used - never listed from the server
-
-  async function handleCreate() {
-    if(!userName.trim()){setError("Enter your name");return;}
-    if(!roomName.trim()){setError("Enter a room name");return;}
-    setLoading(true); setError("");
-    try {
-      await ensureAuth();
-      let code=genRoomCode();
-      for(let i=0;i<5&&await roomExists(code);i++) code=genRoomCode(); // avoid colliding with an existing room
-      await registerRoom(code,roomName.trim(),auth.currentUser?.uid||"anonymous");
-      rememberRoom(code,roomName.trim());
-      await onJoin(code,userName.trim(),true);
-    } catch(e) {
-      setError(e?.code==="PERMISSION_DENIED"||/permission/i.test(e?.message||"")
-        ? "Couldn't create the room — the database rejected the request. Check the Firebase rules."
-        : "Couldn't create the room: "+(e?.message||"network error"));
-    }
-    setLoading(false);
-  }
-  async function handleJoin() {
-    if(!userName.trim()){setError("Enter your name");return;}
-    const code=joinCode.trim().toUpperCase().replace(/[^A-Z0-9]/g,"");
-    if(!isValidRoomCode(code)){setError("Room codes are 6–8 letters and numbers");return;}
-    setLoading(true); setError("");
-    try {
-      await ensureAuth();
-      if(!await roomExists(code)){setError("Room not found — check the code and try again");setLoading(false);return;}
-      await onJoin(code,userName.trim(),false);
-    } catch(e) {
-      setError(e?.message==="Room not found"?"Room not found — check the code and try again"
-        :"Couldn't join the room: "+(e?.message||"network error"));
-    }
-    setLoading(false);
-  }
-
-  return (
-    <Modal title="Collaborate" subtitle="Real-time shared timetable editing" onClose={onClose} width={460}>
-      <div style={{padding:20}}>
-        <Field label="Your Display Name" required>
-          <input value={userName} onChange={e=>setUserName(e.target.value)} placeholder="e.g. Dr. Alice Chen" autoFocus/>
-        </Field>
-
-        {mode==="pick"&&(
-          <div style={{display:"flex",flexDirection:"column",gap:10,marginTop:4}}>
-            <button onClick={()=>setMode("create")}
-              style={{background:"rgba(5,150,105,0.08)",border:"1px solid rgba(110,231,183,0.25)",
-                borderRadius:"var(--r2)",padding:"14px 16px",cursor:"pointer",textAlign:"left",color:"var(--text)",fontFamily:"inherit"}}>
-              <div style={{fontSize:13,fontWeight:600,color:"var(--accent)",marginBottom:3}}>⊕ Create a Room</div>
-              <div style={{fontSize:11,color:"var(--muted)"}}>Start a new session · share the code with your team</div>
-            </button>
-            <button onClick={()=>setMode("join")}
-              style={{background:"rgba(59,130,246,0.08)",border:"1px solid rgba(59,130,246,0.25)",
-                borderRadius:"var(--r2)",padding:"14px 16px",cursor:"pointer",textAlign:"left",color:"var(--text)",fontFamily:"inherit"}}>
-              <div style={{fontSize:13,fontWeight:600,color:"#60a5fa",marginBottom:3}}>→ Join a Room</div>
-              <div style={{fontSize:11,color:"var(--muted)"}}>Enter your room code to join a session</div>
-            </button>
-            {knownRooms.length>0&&(
-              <div style={{marginTop:4}}>
-                <div style={{fontSize:10,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>Recent Rooms</div>
-                {knownRooms.map(r=>(
-                  <div key={r.code} onClick={()=>{setJoinCode(r.code);setMode("join");}}
-                    style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",borderRadius:"var(--r)",
-                      border:"1px solid var(--border)",marginBottom:5,cursor:"pointer",background:"var(--bg3)"}}>
-                    <span style={{fontSize:11,fontFamily:"var(--mono)",fontWeight:700,color:"var(--accent)",letterSpacing:"0.1em"}}>{r.code}</span>
-                    <span style={{fontSize:11,color:"var(--text)",flex:1}}>{r.name||"Room"}</span>
-                    <span style={{fontSize:9,color:"var(--muted2)"}}>{new Date(r.at).toLocaleDateString()}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {mode==="create"&&(
-          <div style={{marginTop:4}}>
-            <Field label="Room Name" required>
-              <input value={roomName} onChange={e=>setRoomName(e.target.value)}
-                placeholder="e.g. CS Dept — Semester 1 2026" onKeyDown={e=>e.key==="Enter"&&handleCreate()}/>
-            </Field>
-            {error&&<div style={{color:"var(--danger)",fontSize:11,marginBottom:10}}>{error}</div>}
-            <div style={{display:"flex",gap:8}}>
-              <Btn variant="outline" onClick={()=>setMode("pick")}>← Back</Btn>
-              <Btn variant="primary" onClick={handleCreate} disabled={loading} style={{flex:1,justifyContent:"center"}}>
-                {loading?"Creating…":"Create Room"}
-              </Btn>
-            </div>
-          </div>
-        )}
-
-        {mode==="join"&&(
-          <div style={{marginTop:4}}>
-            <Field label="Room Code" required>
-              <input value={joinCode} onChange={e=>setJoinCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,""))}
-                placeholder="XXXXXXXX" maxLength={8}
-                style={{fontFamily:"var(--mono)",fontSize:18,letterSpacing:"0.3em",textAlign:"center"}}
-                onKeyDown={e=>e.key==="Enter"&&handleJoin()}/>
-            </Field>
-            {error&&<div style={{color:"var(--danger)",fontSize:11,marginBottom:10}}>{error}</div>}
-            <div style={{display:"flex",gap:8}}>
-              <Btn variant="outline" onClick={()=>setMode("pick")}>← Back</Btn>
-              <Btn variant="primary" onClick={handleJoin} disabled={loading} style={{flex:1,justifyContent:"center"}}>
-                {loading?"Joining…":"Join Room"}
-              </Btn>
-            </div>
-          </div>
-        )}
-      </div>
-    </Modal>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  PRESENCE BAR
-// ═══════════════════════════════════════════════════════════════════
-function PresenceBar({ session, presence, syncing, lastSyncAt, onLeave, onCopyCode }) {
-  const [copied, setCopied] = useState(false);
-  const [ago, setAgo] = useState("");
-  useEffect(()=>{
-    const t=setInterval(()=>{
-      if(lastSyncAt) setAgo(Math.round((Date.now()-lastSyncAt)/1000)+"s ago");
-    },1000);
-    return ()=>clearInterval(t);
-  },[lastSyncAt]);
-
-  function copy() {
-    navigator.clipboard?.writeText(session.roomCode).catch(()=>{});
-    setCopied(true); setTimeout(()=>setCopied(false),1800);
-    onCopyCode?.();
-  }
-
-  const others=Object.entries(presence).filter(([id])=>id!==session.userId);
-
-  return (
-    <div style={{height:36,display:"flex",alignItems:"center",gap:10,padding:"0 14px",flexShrink:0,
-      background:"rgba(5,150,105,0.05)",borderBottom:"1px solid rgba(110,231,183,0.12)"}}>
-      {/* Room pill */}
-      <button onClick={copy}
-        style={{display:"flex",alignItems:"center",gap:6,background:"rgba(5,150,105,0.08)",
-          border:"1px solid rgba(110,231,183,0.25)",borderRadius:99,padding:"3px 10px",
-          cursor:"pointer",fontFamily:"var(--mono)",fontSize:11,fontWeight:700,
-          color:"var(--accent)",letterSpacing:"0.1em"}}>
-        {session.roomCode}
-        <span style={{fontSize:8,fontFamily:"'Outfit',sans-serif",fontWeight:400,
-          color:copied?"var(--accent)":"var(--muted)",letterSpacing:"normal"}}>
-          {copied?"✓ copied":"copy"}
-        </span>
-      </button>
-
-      {/* Avatars */}
-      <div style={{display:"flex",alignItems:"center"}}>
-        <div title={session.userName+" (you)"}
-          style={{width:22,height:22,borderRadius:"50%",background:session.userColor+"22",
-            border:"2px solid "+session.userColor,display:"flex",alignItems:"center",
-            justifyContent:"center",fontSize:8,fontWeight:700,color:session.userColor,
-            zIndex:20,marginRight:others.length?-5:0}}>
-          {initials(session.userName)}
-        </div>
-        {others.slice(0,7).map(([id,p],i)=>(
-          <div key={id} title={p.name}
-            style={{width:22,height:22,borderRadius:"50%",background:p.color+"22",
-              border:"2px solid "+p.color,display:"flex",alignItems:"center",
-              justifyContent:"center",fontSize:8,fontWeight:700,color:p.color,
-              zIndex:19-i,marginRight:i<Math.min(others.length-1,6)?-5:0}}>
-            {initials(p.name)}
-          </div>
-        ))}
-        {others.length>7&&(
-          <div style={{width:22,height:22,borderRadius:"50%",background:"var(--bg4)",
-            border:"1px solid var(--border2)",display:"flex",alignItems:"center",
-            justifyContent:"center",fontSize:8,color:"var(--muted)",marginLeft:3}}>
-            +{others.length-7}
-          </div>
-        )}
-      </div>
-
-      <span style={{fontSize:10,color:"var(--muted)"}}>
-        {Object.keys(presence).length<=1?"Just you":`${Object.keys(presence).length} online`}
-      </span>
-
-      <div style={{flex:1}}/>
-
-      {syncing&&(
-        <div style={{display:"flex",alignItems:"center",gap:4,fontSize:9,color:"var(--accent)"}}>
-          <span style={{width:5,height:5,borderRadius:"50%",background:"var(--accent)",animation:"pulse 0.7s infinite"}}/>
-          Syncing
-        </div>
-      )}
-      {!syncing&&lastSyncAt&&(
-        <span style={{fontSize:9,color:"var(--muted2)"}}>✓ {ago}</span>
-      )}
-
-      <Btn variant="danger" size="xs" onClick={onLeave} style={{marginLeft:4}}>Leave</Btn>
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  LIVE ACTIVITY FEED (ops log viewer)
-// ═══════════════════════════════════════════════════════════════════
-function ActivityFeed({ roomCode, presence, selfId }) {
-  const [ops, setOps] = useState([]);
-  const [, setNow] = useState(0);
-  useEffect(()=>{
-    if(!roomCode) return;
-    setOps([]);
-    const seen=new Set();
-    const off=subscribeOps(roomCode,op=>{
-      if(seen.has(op.key)) return; seen.add(op.key);
-      setOps(prev=>[...prev,op].slice(-50));
-    });
-    const t=setInterval(()=>setNow(x=>x+1),10000); // refresh "x s ago" labels
-    return ()=>{ off&&off(); clearInterval(t); };
-  },[roomCode]);
-
-  const recent=[...ops].reverse().slice(0,30);
-  return (
-    <div style={{display:"flex",flexDirection:"column",height:"100%"}}>
-      <div style={{padding:"12px 16px",borderBottom:"1px solid var(--border)",flexShrink:0}}>
-        <div style={{fontSize:13,fontWeight:700,marginBottom:2}}>Live Activity</div>
-        <div style={{fontSize:11,color:"var(--muted)"}}>Real-time log of all changes in this room</div>
-      </div>
-
-      {/* Who's online */}
-      <div style={{padding:"10px 14px",borderBottom:"1px solid var(--border)",flexShrink:0}}>
-        <div style={{fontSize:10,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",
-          letterSpacing:"0.08em",marginBottom:8}}>Online Now</div>
-        <div style={{display:"flex",flexDirection:"column",gap:6}}>
-          {Object.entries(presence).map(([id,p])=>(
-            <div key={id} style={{display:"flex",alignItems:"center",gap:8}}>
-              <div style={{width:8,height:8,borderRadius:"50%",background:p.color,flexShrink:0,
-                boxShadow:"0 0 6px "+p.color}}/>
-              <span style={{fontSize:11,color:"var(--text)",fontWeight:id===selfId?600:400}}>
-                {p.name}{id===selfId?" (you)":""}
-              </span>
-              <span style={{fontSize:9,color:"var(--muted2)",marginLeft:"auto"}}>
-                {Math.round((Date.now()-p.at)/1000)}s ago
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Ops */}
-      <div style={{flex:1,overflowY:"auto",padding:14,minHeight:0,WebkitOverflowScrolling:"touch"}}>
-        <div style={{fontSize:10,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",
-          letterSpacing:"0.08em",marginBottom:10}}>Recent Changes</div>
-        {recent.length===0&&(
-          <div style={{color:"var(--muted2)",fontSize:11,textAlign:"center",paddingTop:20}}>
-            No activity yet
-          </div>
-        )}
-        {recent.map((op,i)=>{
-          const isMe=op.userId===selfId;
-          return (
-            <div key={op.id||i} style={{display:"flex",gap:8,marginBottom:10,alignItems:"flex-start"}}>
-              <div style={{width:6,height:6,borderRadius:"50%",background:isMe?"var(--accent)":"var(--muted)",
-                flexShrink:0,marginTop:4}}/>
-              <div style={{flex:1}}>
-                <span style={{fontSize:11,fontWeight:600,color:isMe?"var(--accent)":"var(--text)"}}>
-                  {op.userName||"Someone"}
-                </span>
-                <span style={{fontSize:11,color:"var(--muted)"}}> {op.type||"made a change"}</span>
-                {op.detail&&<div style={{fontSize:10,color:"var(--muted2)",marginTop:1}}>{op.detail}</div>}
-                <div style={{fontSize:9,color:"var(--muted2)",marginTop:2,fontFamily:"var(--mono)"}}>
-                  {new Date(op.at).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit",second:"2-digit"})}
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-
-// ═══════════════════════════════════════════════════════════════════
-//  ROOT APP
-
-// ═══════════════════════════════════════════════════════════════════
-//  AUTH HOOK
+//  AUTH
 // ═══════════════════════════════════════════════════════════════════
 function useAuth() {
-  const [user, setUser]       = useState(undefined); // undefined = loading
+  const [user, setUser] = useState(null);
+  const [authUid, setAuthUid] = useState(null); // includes the anonymous identity used for room codes
   const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const unsub = onAuthChange(u => {
-      // Anonymous identities exist only so room-code joiners pass database rules.
-      // They are not "signed in" as far as the UI and cloud save are concerned.
-      setUser(u && !u.isAnonymous ? u : null);
-      setLoading(false);
-    });
-    return unsub;
-  }, []);
-
-  return { user, loading };
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  LOGIN SCREEN
-// ═══════════════════════════════════════════════════════════════════
-function LoginScreen({ onSkip }) {
-  const [loading, setLoading] = useState(false);
-  const [error,   setError]   = useState("");
-
-  async function handleGoogle() {
-    setLoading(true); setError("");
-    try {
-      await signInWithGoogle();
-    } catch(e) {
-      const x=explainAuthError(e);
-      if(!x.silent) setError(x.message);
-    }
+  useEffect(() => onAuthChange(u => {
+    // Anonymous identities exist only so room-code joiners pass database rules; the UI treats them as "not signed in".
+    setAuthUid(u?.uid || null);
+    setUser(u && !u.isAnonymous ? u : null);
     setLoading(false);
-  }
-
-  return (
-    <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",
-      background:"var(--bg)",fontFamily:"'Outfit',sans-serif"}}>
-      <div style={{width:380,padding:36,background:"var(--bg2)",borderRadius:"var(--r3)",
-        border:"1px solid var(--border2)",boxShadow:"var(--shadow)",textAlign:"center"}}>
-
-        {/* Logo */}
-        <div style={{width:48,height:48,borderRadius:12,background:"var(--accent)",
-          display:"flex",alignItems:"center",justifyContent:"center",
-          fontSize:22,fontWeight:800,color:"#fff",margin:"0 auto 16px"}}>K</div>
-
-        <div style={{fontSize:22,fontWeight:700,marginBottom:6}}>Welcome to Kronos 2.0</div>
-        <div style={{fontSize:13,color:"var(--muted)",marginBottom:28}}>
-          Sign in to save your timetable and collaborate with your team
-        </div>
-
-        {/* Google sign-in */}
-        <button onClick={handleGoogle} disabled={loading}
-          style={{width:"100%",padding:"11px 16px",borderRadius:"var(--r2)",
-            background:loading?"var(--bg4)":"var(--text)",color:loading?"var(--muted)":"var(--bg2)",
-            border:"1px solid var(--border2)",fontSize:14,fontWeight:600,
-            cursor:loading?"not-allowed":"pointer",fontFamily:"inherit",
-            display:"flex",alignItems:"center",justifyContent:"center",gap:10,
-            marginBottom:12,transition:"all 0.15s"}}>
-          <svg width="18" height="18" viewBox="0 0 18 18">
-            <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z"/>
-            <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332C2.438 15.983 5.482 18 9 18z"/>
-            <path fill="#FBBC05" d="M3.964 10.71c-.18-.54-.282-1.117-.282-1.71s.102-1.17.282-1.71V4.958H.957C.347 6.173 0 7.548 0 9s.348 2.827.957 4.042l3.007-2.332z"/>
-            <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017.957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/>
-          </svg>
-          {loading ? "Signing in…" : "Continue with Google"}
-        </button>
-
-        {error && (
-          <div style={{fontSize:11,color:"var(--danger)",marginBottom:12,
-            padding:"8px 10px",background:"rgba(220,38,38,0.08)",borderRadius:"var(--r)"}}>
-            {error}
-          </div>
-        )}
-
-        {/* Skip option */}
-        <button onClick={onSkip}
-          style={{width:"100%",padding:"9px",borderRadius:"var(--r2)",
-            background:"transparent",color:"var(--muted)",border:"1px solid var(--border)",
-            fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>
-          Continue without account
-        </button>
-
-        <div style={{fontSize:11,color:"var(--muted2)",marginTop:16,lineHeight:1.5}}>
-          Signing in saves your timetable to the cloud so you can access it from any device.
-          Without an account, data is only saved in this browser.
-        </div>
-      </div>
-    </div>
-  );
+  }), []);
+  return { user, authUid, loading };
 }
 
+const readName = () => { try { return localStorage.getItem("kronos_user") || ""; } catch { return ""; } };
+const writeName = n => { try { localStorage.setItem("kronos_user", n); } catch { /* private mode */ } };
+
+// ═══════════════════════════════════════════════════════════════════
+//  ROOT
 // ═══════════════════════════════════════════════════════════════════
 export default function TimetableBuilder() {
-  const { user, loading: authLoading } = useAuth();
-  const [skipAuth, setSkipAuth]         = useState(false);
-  const [state,    setStateRaw]         = useState(()=>sanitizeState(loadLocal())||seed());
-  const [tab,      setTab]              = useState("schedule");
-  const [modal,    setModal]            = useState(null);
-  const [showCollab,setShowCollab]      = useState(false);
-  const [userName, setUserName]         = useState(()=>localStorage.getItem("kronos_user")||"");
-  const [cloudSaving, setCloudSaving]   = useState(false);
-  const [cloudError, setCloudError]     = useState(false);
+  const { user, authUid, loading: authLoading } = useAuth();
+  const theme = useTheme();
+  const isPhone = useMedia("(max-width: 760px)");
+  const [joinLinkCode] = useState(() => codeFromSearch(typeof window !== "undefined" ? window.location.search : ""));
+  const [skipAuth, setSkipAuth] = useState(!!joinLinkCode);
+  const [state, setStateRaw] = useState(() => sanitizeState(loadLocal()) || seed());
+  const [tab, setTab] = useState("schedule");
+  const [modal, setModal] = useState(null);
+  const [showCollab, setShowCollab] = useState(!!joinLinkCode);
+  const [showShare, setShowShare] = useState(false);
+  const [showMore, setShowMore] = useState(false);
+  const [userName, setUserName] = useState(readName);
+  const [cloudSaving, setCloudSaving] = useState(false);
+  const [cloudError, setCloudError] = useState(false);
   const [lastCloudSave, setLastCloudSave] = useState(null);
-  const [syncChoice, setSyncChoice]     = useState(null); // {remote, savedAt} when local and cloud copies differ
-  const stateRef                        = useRef(state);   // always the latest state, readable outside render
-  const cloudReadyRef                   = useRef(false);   // false until we know whether to trust local or cloud
-  const saveTimerRef                    = useRef(null);
-  const pendingCloudRef                 = useRef(null);    // latest unsaved state for the signed-in user
-  const userRef                         = useRef(null);
-  const toast                           = useToasts();
+  const [syncChoice, setSyncChoice] = useState(null); // {remote, savedAt} when local and cloud copies differ
+  const stateRef = useRef(state);          // always the latest state, readable outside render
+  const cloudReadyRef = useRef(false);     // false until we know whether to trust local or cloud
+  const saveTimerRef = useRef(null);
+  const pendingCloudRef = useRef(null);    // latest unsaved state for the signed-in user
+  const userRef = useRef(null);
+  const toast = useToasts();
   userRef.current = user;
 
-  // All state changes go through here. Side effects (local save, room sync,
-  // cloud save) happen OUTSIDE React's state updater so they run exactly once.
-  const commit = useCallback(next=>{ stateRef.current=next; setStateRaw(next); saveLocal(next); },[]);
+  // A share link (?join=CODE) is consumed once: tidy the address bar so a refresh doesn't reopen it.
+  useEffect(() => {
+    if (joinLinkCode) { try { window.history.replaceState(null, "", window.location.pathname); } catch { /* ignore */ } }
+  }, [joinLinkCode]);
+
+  // All state changes go through here. Side effects (local save, room sync, cloud save) happen
+  // OUTSIDE React's state updater so they run exactly once.
+  const commit = useCallback(next => { stateRef.current = next; setStateRaw(next); saveLocal(next); }, []);
 
   // Changes arriving from collaborators: applied without being pushed back.
-  // Returns true if anything actually changed (echoes of our own writes change nothing).
-  const applyRemote = useCallback(fn=>{
-    const prev=stateRef.current, raw=fn(prev);
-    if(raw===prev) return false;
+  const applyRemote = useCallback(fn => {
+    const prev = stateRef.current, raw = fn(prev);
+    if (raw === prev) return false;
     commit(sanitizeState(raw));
     return true;
-  },[commit]);
+  }, [commit]);
 
-  const collab=useCollaboration({getState:()=>stateRef.current, applyRemote, toast:toast.push});
+  const collab = useCollaboration({ getState: () => stateRef.current, applyRemote, toast: toast.push, sanitize: sanitizeState, backup: backupLocalState });
+  const { session, canEdit } = collab;
 
   // ── Cloud save (signed-in solo use): debounced, flushed on exit, errors shown ──
-  const flushCloudSave=useCallback(async()=>{
+  const flushCloudSave = useCallback(async () => {
     clearTimeout(saveTimerRef.current);
-    const job=pendingCloudRef.current, u=userRef.current;
-    if(!job||!u||!cloudReadyRef.current) return;
-    pendingCloudRef.current=null;
+    const job = pendingCloudRef.current, u = userRef.current;
+    if (!job || !u || !cloudReadyRef.current) return;
+    pendingCloudRef.current = null;
     try {
       await saveUserState(u.uid, job);
       setCloudError(false); setLastCloudSave(Date.now());
-    } catch(e) {
-      pendingCloudRef.current=job; // keep it so the next change retries
+    } catch {
+      pendingCloudRef.current = job; // keep it so the next change retries
       setCloudError(true);
-      toast.push("Couldn't save to the cloud — your changes are kept on this device","warn");
+      toast.push("Couldn't save to the cloud. Your changes are kept on this device.", "warn");
     }
-    setCloudSaving(pendingCloudRef.current!==null);
-  },[]);
-  const scheduleCloudSave=useCallback(next=>{
-    if(!userRef.current||!cloudReadyRef.current) return;
-    pendingCloudRef.current=next;
+    setCloudSaving(pendingCloudRef.current !== null);
+  }, [toast.push]);
+  const scheduleCloudSave = useCallback(next => {
+    if (!userRef.current || !cloudReadyRef.current) return;
+    pendingCloudRef.current = next;
     setCloudSaving(true);
     clearTimeout(saveTimerRef.current);
-    saveTimerRef.current=setTimeout(flushCloudSave,2000);
-  },[flushCloudSave]);
+    saveTimerRef.current = setTimeout(flushCloudSave, 2000);
+  }, [flushCloudSave]);
 
   // Warn before closing the tab while a cloud save is still pending; try to flush when hidden.
-  useEffect(()=>{
-    const onUnload=e=>{ if(pendingCloudRef.current){ flushCloudSave(); e.preventDefault(); e.returnValue=""; } };
-    const onHide=()=>{ if(document.visibilityState==="hidden") flushCloudSave(); };
-    window.addEventListener("beforeunload",onUnload);
-    document.addEventListener("visibilitychange",onHide);
-    return ()=>{ window.removeEventListener("beforeunload",onUnload); document.removeEventListener("visibilitychange",onHide); };
-  },[flushCloudSave]);
+  useEffect(() => {
+    const onUnload = e => { if (pendingCloudRef.current) { flushCloudSave(); e.preventDefault(); e.returnValue = ""; } };
+    const onHide = () => { if (document.visibilityState === "hidden") flushCloudSave(); };
+    window.addEventListener("beforeunload", onUnload);
+    document.addEventListener("visibilitychange", onHide);
+    return () => { window.removeEventListener("beforeunload", onUnload); document.removeEventListener("visibilitychange", onHide); };
+  }, [flushCloudSave]);
 
   // ── On sign-in: never silently replace local work with the cloud copy (or vice-versa) ──
-  useEffect(()=>{
-    cloudReadyRef.current=false; pendingCloudRef.current=null; clearTimeout(saveTimerRef.current);
+  useEffect(() => {
+    cloudReadyRef.current = false; pendingCloudRef.current = null; clearTimeout(saveTimerRef.current);
     setCloudSaving(false); setCloudError(false); setSyncChoice(null);
-    if(!user) return;
-    setUserName(user.displayName||user.email||"");
-    localStorage.setItem("kronos_user", user.displayName||user.email||"");
-    let cancelled=false;
-    (async()=>{
+    if (!user) return;
+    const n = user.displayName || user.email || "";
+    setUserName(n); writeName(n);
+    let cancelled = false;
+    (async () => {
       try {
         const remote = await loadUserState(user.uid);
-        if(cancelled) return;
+        if (cancelled) return;
         const local = stateRef.current;
-        if(!remote) { cloudReadyRef.current=true; scheduleCloudSave(local); return; } // first sign-in: upload what's here
+        if (!remote) { cloudReadyRef.current = true; scheduleCloudSave(local); return; } // first sign-in: upload what's here
         const { _savedAt, ...appState } = remote;
         const clean = sanitizeState(appState);
-        const differs = !same({...clean,changelog:[]},{...local,changelog:[]});
-        if(!differs) { cloudReadyRef.current=true; return; }
-        setSyncChoice({remote:clean,savedAt:_savedAt||null}); // wait for the person to choose
-      } catch(e) {
-        if(cancelled) return;
-        cloudReadyRef.current=false;
-        toast.push("Couldn't reach your cloud copy — working locally for now","warn");
+        if (same({ ...clean, changelog: [] }, { ...local, changelog: [] })) { cloudReadyRef.current = true; return; }
+        setSyncChoice({ remote: clean, savedAt: _savedAt || null }); // wait for the person to choose
+      } catch {
+        if (cancelled) return;
+        cloudReadyRef.current = false;
+        toast.push("Couldn't reach your cloud copy. Working locally for now.", "warn");
       }
     })();
-    return ()=>{ cancelled=true; };
-  },[user?.uid]);
+    return () => { cancelled = true; };
+  }, [user?.uid]);
 
   function chooseCloudCopy() {
-    backupLocalState(stateRef.current,"before loading cloud copy");
+    backupLocalState(stateRef.current, "before loading cloud copy");
     commit(syncChoice.remote);
-    cloudReadyRef.current=true;
+    cloudReadyRef.current = true;
     setSyncChoice(null);
-    toast.push("Cloud timetable loaded — your previous local version was backed up in this browser","ok");
+    toast.push("Cloud timetable loaded. Your previous local version was backed up in this browser.", "ok");
   }
   function keepLocalCopy() {
-    cloudReadyRef.current=true;
+    cloudReadyRef.current = true;
     setSyncChoice(null);
     scheduleCloudSave(stateRef.current); // overwrites the cloud copy with this browser's version
   }
 
-  const setState=useCallback((updater,opType,opDetail)=>{
-    const prev=stateRef.current;
-    const next=typeof updater==="function"?updater(prev):updater;
-    if(next===prev) return;
+  // Viewers can't change the timetable, whatever the UI does.
+  const canEditRef = useRef(true);
+  canEditRef.current = canEdit;
+  const setState = useCallback((updater, opType, opDetail) => {
+    if (!canEditRef.current) { toast.push("You have view-only access to this room.", "info"); return; }
+    const prev = stateRef.current;
+    const next = typeof updater === "function" ? updater(prev) : updater;
+    if (next === prev) return;
     commit(next);
-    collab.pushDiff(prev,next,opType,opDetail);
+    collab.pushDiff(prev, next, opType, opDetail);
     scheduleCloudSave(next);
-  },[commit,collab.pushDiff,scheduleCloudSave]);
+  }, [commit, collab.pushDiff, scheduleCloudSave, toast.push]);
 
-  const conflicts=useMemo(()=>getAllConflicts(state.appointments||{},state.slots),[state.appointments,state.slots]);
+  const conflicts = useMemo(() => getAllConflicts(state.appointments || {}, state.slots), [state.appointments, state.slots]);
 
-  function log(action,detail="") {
-    setState(prev=>({...prev,changelog:[...prev.changelog.slice(-199),{at:Date.now(),action,detail}]}),action,detail);
-  }
+  // Signing in or out changes our database identity; room access is tied to it, so join again with the same code.
+  const lastUid = useRef(null);
+  useEffect(() => {
+    const prev = lastUid.current;
+    lastUid.current = authUid;
+    if (prev && authUid && prev !== authUid && collab.session) collab.rejoin();
+  }, [authUid]);
 
-  function handleApptClick(appt) { setModal({appt}); }
-  function handleCellClick(weekNum,dayIdx,timeId) { setModal({weekNum,dayIdx,timeId}); }
+  function handleApptClick(appt) { setModal({ appt }); }
+  function handleCellClick(weekNum, dayIdx, timeId) { if (canEdit) setModal({ weekNum, dayIdx, timeId }); }
 
-  function handleApptSave(appts,isEdit) {
-    const opDetail=appts.map(a=>`W${a.weekNum} ${DAYS[a.dayIdx]} ${a.timeId}`).join(", ");
-    setState(s=>{
-      const next={...s.appointments};
-      appts.forEach(a=>{next[a.id]=a;});
-      return {...s,appointments:next,
-        changelog:[...s.changelog.slice(-199),{at:Date.now(),
-          action:isEdit?"Session updated":"Session scheduled",detail:appts[0]?.courseName}]};
-    }, isEdit?"updated session":"scheduled session", opDetail);
-    toast.push(isEdit?"Session updated":`${appts.length} session${appts.length!==1?"s":""} scheduled`,"ok");
+  function handleApptSave(appts, isEdit) {
+    const opDetail = appts.map(a => `W${a.weekNum} ${DAYS[a.dayIdx]} ${a.timeId}`).join(", ");
+    setState(s => {
+      const next = { ...s.appointments };
+      appts.forEach(a => { next[a.id] = a; });
+      return { ...s, appointments: next,
+        changelog: [...s.changelog.slice(-199), { at: Date.now(), action: isEdit ? "Session updated" : "Session scheduled", detail: appts[0]?.courseName }] };
+    }, isEdit ? "updated session" : "scheduled session", opDetail);
+    toast.push(isEdit ? "Session updated" : `${appts.length} session${appts.length !== 1 ? "s" : ""} scheduled`, "ok");
     setModal(null);
   }
 
   function handleApptDelete(id) {
-    const appt=stateRef.current.appointments[id];
-    setState(s=>{const a={...s.appointments};delete a[id];return{...s,appointments:a,
-      changelog:[...s.changelog.slice(-199),{at:Date.now(),action:"Session deleted",detail:appt?.courseName}]};
-    },"deleted session",appt?.courseName);
-    toast.push("Session deleted","warn");
+    const appt = stateRef.current.appointments[id];
+    setState(s => { const a = { ...s.appointments }; delete a[id];
+      return { ...s, appointments: a, changelog: [...s.changelog.slice(-199), { at: Date.now(), action: "Session deleted", detail: appt?.courseName }] };
+    }, "deleted session", appt?.courseName);
+    collab.commentApi.removeForAppt(id);
+    toast.push("Session deleted", "warn");
   }
 
   async function handleSignIn() {
     try { await signInWithGoogle(); }
-    catch(e) { const x=explainAuthError(e); if(!x.silent) toast.push(x.message,"warn",10000); }
+    catch (e) { const x = explainAuthError(e); if (!x.silent) toast.push(x.message, "warn", 10000); }
   }
-
   async function handleSignOut() {
     flushCloudSave();
-    const sess=collab.session;
-    if(sess) await collab.leaveRoom();           // room access depends on the signed-in identity...
     await signOutUser();
-    if(sess) {                                    // ...so rejoin under an anonymous one
-      try { await ensureAuth(); await collab.joinRoom(sess.roomCode,sess.userName,false); }
-      catch { toast.push("Signed out — you left the room. Rejoin with the code.","warn"); }
-    }
+    if (collab.session) { try { await ensureAuth(); } catch { /* the access-lost dialog explains it */ } } // new anonymous identity; the effect above rejoins
   }
 
-  async function handleJoinRoom(code,name,isOwner) {
+  async function handleCreateRoom(roomName, name) {
     const displayName = user?.displayName || name;
-    if(displayName) { setUserName(displayName); localStorage.setItem("kronos_user",displayName); }
-    await collab.joinRoom(code,displayName||name,isOwner); // throws on failure; CollabModal shows the error
+    setUserName(displayName); writeName(displayName);
+    await collab.createRoom(roomName, displayName);
     setShowCollab(false);
-    toast.push(isOwner?`Room ${code} created — share this code!`:`Joined room ${code}`,"ok");
+    setShowShare(true);
+    toast.push("Room created. Share the editor code or the read-only link.", "ok");
+  }
+  async function handleJoinRoom(code, name) {
+    const displayName = user?.displayName || name;
+    setUserName(displayName); writeName(displayName);
+    const sess = await collab.joinRoom(code, displayName);
+    setShowCollab(false);
+    setTab("schedule");
+    toast.push(`Joined ${sess.roomName || "the room"} as ${ROLE_LABEL[sess.role].toLowerCase()}`, "ok");
   }
 
-  // Tell collaborators which tab we're on and which session we have open
-  useEffect(()=>{ collab.setPresenceFields({tab}); },[tab,collab.session?.roomCode]);
-  useEffect(()=>{ collab.setPresenceFields({editing:modal?.appt?.id||null}); },[modal?.appt?.id,collab.session?.roomCode]);
-  const presenceCtx=useMemo(()=>{
-    const editing={};
-    Object.entries(collab.presence).forEach(([id,p])=>{
-      if(id===collab.session?.userId||!p.editing) return;
-      (editing[p.editing]||=[]).push({name:p.name||"Someone",color:p.color||"#888"});
+  // Tell collaborators which view we're on and which session we have open
+  useEffect(() => { collab.setPresenceFields({ tab }); }, [tab, session?.roomCode]);
+  useEffect(() => { collab.setPresenceFields({ editing: modal?.appt?.id || null }); }, [modal?.appt?.id, session?.roomCode]);
+  const presenceCtx = useMemo(() => {
+    const editing = {};
+    Object.entries(collab.presence).forEach(([id, p]) => {
+      if (id === session?.userId || !p.editing) return;
+      (editing[p.editing] ||= []).push({ name: p.name || "Someone", color: p.color || "#888" });
     });
-    return {editing};
-  },[collab.presence,collab.session?.userId]);
+    return { editing };
+  }, [collab.presence, session?.userId]);
 
-  useEffect(()=>{
-    const el=document.createElement("style");
-    el.textContent=GLOBAL_CSS;
-    document.head.appendChild(el);
-    return ()=>el.remove();
-  },[]);
+  const collabCtx = useMemo(() => ({
+    session, role: collab.role, canEdit, inRoom: !!session,
+    comments: collab.comments, api: session ? collab.commentApi : null,
+  }), [session, collab.role, canEdit, collab.comments, collab.commentApi]);
 
-  // Show login screen while auth loading or if not signed in and not skipped
-  if(authLoading) return (
-    <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",
-      background:"var(--bg)",fontFamily:"'Outfit',sans-serif"}}>
-      <div style={{textAlign:"center"}}>
-        <div style={{width:40,height:40,borderRadius:10,background:"var(--accent)",
-          display:"flex",alignItems:"center",justifyContent:"center",
-          fontSize:18,fontWeight:800,color:"#fff",margin:"0 auto 12px"}}>K</div>
-        <div style={{color:"var(--muted)",fontSize:13}}>Loading…</div>
+  const views = useMemo(() => visibleViews({ canEdit, inRoom: !!session }), [canEdit, session]);
+  useEffect(() => { if (!views.some(v => v.id === tab)) setTab("schedule"); }, [views, tab]);
+
+  if (authLoading) return (
+    <div role="status" style={{ position: "fixed", inset: 0, display: "grid", placeItems: "center", background: "var(--bg)" }}>
+      <div style={{ textAlign: "center" }}>
+        <div className="brand-mark" style={{ margin: "0 auto 12px", width: 40, height: 40, fontSize: 18 }} aria-hidden="true">K</div>
+        <div style={{ color: "var(--muted)", fontSize: 14 }}>Loading…</div>
       </div>
     </div>
   );
-  if(!user && !skipAuth) return <LoginScreen onSkip={()=>setSkipAuth(true)}/>;
+  if (!user && !skipAuth) return <LoginScreen onSkip={() => setSkipAuth(true)} />;
 
-  const conflictCount=conflicts.length;
-  const TABS_WITH_ACTIVITY = collab.session
-    ? [...TABS,{id:"activity",icon:"◉",label:"Activity"}]
-    : TABS;
+  const conflictCount = conflicts.length;
+  const openComments = Object.values(collab.comments.open || {}).reduce((a, b) => a + b, 0);
+  const counts = { conflicts: conflictCount, comments: openComments };
+  const current = VIEWS.find(v => v.id === tab) || VIEWS[0];
+  const subtitle = tab === "schedule"
+    ? `${state.settings.semester || "Semester"}${canEdit ? "" : " · view only"}`
+    : current.sub || state.settings.semester || "";
 
   return (
     <PresenceCtx.Provider value={presenceCtx}>
-    <div style={{display:"flex",flexDirection:"column",height:"100vh",background:"var(--bg)",fontFamily:"'Outfit',sans-serif",overflow:"hidden",position:"fixed",inset:0}}>
-
-      {/* Top bar */}
-      <div style={{height:48,display:"flex",alignItems:"center",padding:"0 16px",
-        borderBottom:"1px solid var(--border)",background:"var(--bg2)",flexShrink:0,gap:10,boxShadow:"0 1px 3px rgba(0,0,0,0.1)"}}>
-        <div style={{display:"flex",alignItems:"center",gap:8}}>
-          <div style={{width:26,height:26,borderRadius:7,background:"var(--accent)",
-            display:"flex",alignItems:"center",justifyContent:"center",
-            fontSize:12,fontWeight:800,color:"#fff",flexShrink:0}}>K</div>
-          <span style={{fontSize:14,fontWeight:700,letterSpacing:"-0.01em"}}>Kronos 2.0</span>
-          <span style={{fontSize:12,color:"var(--muted)",marginLeft:2}}>{state.settings.semester}</span>
-        </div>
-        <div style={{flex:1}}/>
-        {/* Cloud save indicator */}
-        {user&&(
-          <div style={{fontSize:11,color:"var(--muted)",display:"flex",alignItems:"center",gap:4}}>
-            {cloudError
-              ? <><span style={{width:6,height:6,borderRadius:"50%",background:"var(--danger)",display:"inline-block"}}/>Not saved — retrying on next change</>
-              : cloudSaving
-              ? <><span style={{width:6,height:6,borderRadius:"50%",background:"var(--warn)",animation:"pulse 0.8s infinite",display:"inline-block"}}/>Saving…</>
-              : lastCloudSave
-                ? <><span style={{width:6,height:6,borderRadius:"50%",background:"var(--accent)",display:"inline-block"}}/>Saved</>
-                : null
-            }
-          </div>
-        )}
-        {conflictCount>0&&(
-          <div onClick={()=>setTab("conflicts")}
-            style={{display:"flex",alignItems:"center",gap:5,cursor:"pointer",
-              padding:"3px 10px",borderRadius:99,
-              background:"rgba(248,113,113,0.12)",border:"1px solid rgba(248,113,113,0.25)"}}>
-            <span style={{width:5,height:5,borderRadius:"50%",background:"var(--danger)",animation:"pulse 1.5s infinite"}}/>
-            <span style={{fontSize:10,color:"var(--danger)",fontWeight:600}}>
-              {conflictCount} conflict{conflictCount!==1?"s":""}
-            </span>
-          </div>
-        )}
-        {/* Collab button */}
-        {!collab.session?(
-          <Btn variant="outline" onClick={()=>setShowCollab(true)} style={{gap:5}}>
-            <span style={{fontSize:12}}>⬡</span> Collaborate
-          </Btn>
-        ):(
-          <div style={{display:"flex",alignItems:"center",gap:5,padding:"3px 10px",borderRadius:99,
-            background:"rgba(5,150,105,0.08)",border:"1px solid rgba(110,231,183,0.25)"}}>
-            <span style={{width:5,height:5,borderRadius:"50%",background:"var(--accent)",animation:"pulse 2s infinite"}}/>
-            <span style={{fontSize:10,color:"var(--accent)",fontWeight:600,fontFamily:"var(--mono)",
-              letterSpacing:"0.08em"}}>{collab.session.roomCode}</span>
-          </div>
-        )}
-        {/* User avatar */}
-        {user ? (
-          <div style={{display:"flex",alignItems:"center",gap:6}}>
-            {user.photoURL
-              ? <img src={user.photoURL} alt="" style={{width:28,height:28,borderRadius:"50%",border:"2px solid var(--border2)"}}/>
-              : <div style={{width:28,height:28,borderRadius:"50%",background:"var(--bg4)",
-                  border:"1px solid var(--border2)",display:"flex",alignItems:"center",
-                  justifyContent:"center",fontSize:11,fontWeight:600,color:"var(--muted)"}}>
-                  {initials(user.displayName||user.email||"?")}
-                </div>
-            }
-            <Btn variant="ghost" size="xs" onClick={handleSignOut} title="Sign out">Sign out</Btn>
-          </div>
-        ) : (
-          <Btn variant="outline" size="xs" onClick={handleSignIn}>Sign in</Btn>
-        )}
-        <Btn variant="accent" onClick={()=>setModal({weekNum:1,dayIdx:0,timeId:state.slots[0]?.id})}>
-          + Schedule
-        </Btn>
-      </div>
-
-      {/* Presence bar (when in a room) */}
-      {collab.session&&(
-        <PresenceBar
-          session={collab.session}
-          presence={collab.presence}
-          syncing={collab.syncing}
-          lastSyncAt={collab.lastSyncAt}
-          onLeave={()=>{ collab.leaveRoom(); toast.push("Left the room","warn"); }}
-          onCopyCode={()=>toast.push("Room code copied!","ok")}
-        />
-      )}
-
-      {/* Main layout */}
-      <div style={{flex:1,display:"flex",overflow:"hidden",minHeight:0}}>
-        {/* Icon nav */}
-        <nav style={{width:52,background:"var(--bg2)",borderRight:"1px solid var(--border)",
-          display:"flex",flexDirection:"column",alignItems:"center",padding:"8px 0",gap:2,flexShrink:0,boxShadow:"1px 0 0 var(--border)"}}>
-          {TABS_WITH_ACTIVITY.map(t=>{
-            const active=tab===t.id;
-            const isCon=t.id==="conflicts"&&conflictCount>0;
-            return (
-              <button key={t.id} onClick={()=>setTab(t.id)} title={t.label}
-                style={{width:38,height:38,borderRadius:"var(--r)",display:"flex",alignItems:"center",
-                  justifyContent:"center",fontSize:14,cursor:"pointer",border:"none",position:"relative",
-                  background:active?"var(--bg4)":"transparent",
-                  color:active?"var(--accent)":isCon?"var(--danger)":"var(--muted2)",
-                  transition:"all 0.12s",outline:"none"}}>
-                {t.icon}
-                {isCon&&<span style={{position:"absolute",top:5,right:5,width:6,height:6,borderRadius:"50%",background:"var(--danger)"}}/>}
-              </button>
-            );
-          })}
-        </nav>
-
-        {/* Label nav */}
-        <div style={{width:110,background:"var(--bg2)",borderRight:"1px solid var(--border)",
-          display:"flex",flexDirection:"column",padding:"8px 0",gap:2,flexShrink:0}}>
-          {TABS_WITH_ACTIVITY.map(t=>{
-            const active=tab===t.id;
-            const isCon=t.id==="conflicts"&&conflictCount>0;
-            return (
-              <button key={t.id} onClick={()=>setTab(t.id)}
-                style={{padding:"9px 10px",borderRadius:"var(--r)",display:"flex",alignItems:"center",
-                  gap:6,cursor:"pointer",border:"none",margin:"0 4px",
-                  background:active?"var(--bg4)":"transparent",
-                  color:active?"var(--accent)":isCon?"var(--danger)":"var(--muted)",
-                  fontSize:11,fontWeight:active?600:400,fontFamily:"inherit",
-                  transition:"all 0.12s",outline:"none",textAlign:"left"}}>
-                <span style={{fontSize:12}}>{t.icon}</span>
-                {t.label}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Content */}
-        <main style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column",minHeight:0,position:"relative"}}>
-          {tab==="schedule"&&<ScheduleTab state={state} onApptClick={handleApptClick} onCellClick={handleCellClick} conflicts={conflicts}/>}
-          {tab==="dashboard"&&<DashboardTab state={state} conflicts={conflicts}/>}
-          {tab==="autoschedule"&&<AutoScheduleTab state={state} setState={setState} toast={toast.push}/>}
-          {tab==="courses"&&<CoursesTab state={state} setState={setState} toast={toast.push}/>}
-          {tab==="assets"&&<AssetsTab state={state} setState={setState} toast={toast.push}/>}
-          {tab==="instructor"&&<InstructorTab state={state} onApptClick={handleApptClick}/>}
-          {tab==="conflicts"&&<ConflictsTab conflicts={conflicts} state={state} onApptClick={handleApptClick}/>}
-          {tab==="changelog"&&<ChangelogTab log={state.changelog}/>}
-          {tab==="settings"&&<SettingsTab state={state} setState={setState} toast={toast.push}/>}
-          {tab==="activity"&&collab.session&&(
-            <ActivityFeed
-              roomCode={collab.session.roomCode}
-              presence={collab.presence}
-              selfId={collab.session.userId}
-            />
+    <CollabCtx.Provider value={collabCtx}>
+      <div className="app">
+        <Rail views={views} view={tab} onView={setTab} counts={counts} theme={theme.resolved} onToggleTheme={theme.toggle}
+          user={user} onSignIn={handleSignIn} onSignOut={handleSignOut} signedInHint="Sign in to keep your timetable in the cloud" />
+        <div className="main">
+          <header className="top">
+            <div className="top-title">
+              <h1 className="page-title">{current.title || current.label}</h1>
+              {subtitle && <div className="page-sub">{subtitle}</div>}
+            </div>
+            <div className="top-actions">
+              {user && (cloudError
+                ? <span className="pill bad hide-sm" role="status"><span className="dot" />Not saved, will retry</span>
+                : cloudSaving ? <span className="pill warn hide-sm" role="status"><span className="dot pulse" />Saving…</span>
+                : lastCloudSave ? <span className="pill hide-sm" role="status"><span className="dot" />Saved</span> : null)}
+              {conflictCount > 0 && (
+                <button type="button" className="pill bad" onClick={() => setTab("conflicts")}>
+                  <span className="dot pulse" />{conflictCount} conflict{conflictCount !== 1 ? "s" : ""}
+                </button>
+              )}
+              {!session && <Btn variant="outline" size="md" onClick={() => setShowCollab(true)}><Icon name="people" size={16} /> <span className="hide-sm">Work together</span></Btn>}
+              {canEdit && <Btn variant="primary" size="md" onClick={() => setModal({ weekNum: 1, dayIdx: 0, timeId: state.slots[0]?.id })}><Icon name="plus" size={16} /> Schedule</Btn>}
+            </div>
+          </header>
+          {session && (
+            <RoomBar session={session} presence={collab.presence} syncing={collab.syncing} lastSyncAt={collab.lastSyncAt}
+              onShare={() => setShowShare(true)} onLeave={() => { collab.leaveRoom(); toast.push("Left the room. Your copy stays on this device.", "info"); }} />
           )}
-        </main>
+          <main className="view" id="main">
+            {tab === "schedule" && <ScheduleTab state={state} onApptClick={handleApptClick} onCellClick={handleCellClick} conflicts={conflicts} />}
+            {tab === "dashboard" && <DashboardTab state={state} conflicts={conflicts} />}
+            {tab === "autoschedule" && canEdit && <AutoScheduleTab state={state} setState={setState} toast={toast.push} />}
+            {tab === "courses" && canEdit && <CoursesTab state={state} setState={setState} toast={toast.push} />}
+            {tab === "assets" && canEdit && <AssetsTab state={state} setState={setState} toast={toast.push} />}
+            {tab === "instructor" && <InstructorTab state={state} onApptClick={handleApptClick} />}
+            {tab === "conflicts" && <ConflictsTab conflicts={conflicts} state={state} onApptClick={handleApptClick} />}
+            {tab === "comments" && session && <CommentsTab state={state} onOpenAppt={id => { const a = state.appointments[id]; if (a) setModal({ appt: a }); }} />}
+            {tab === "changelog" && canEdit && <ChangelogTab log={state.changelog} />}
+            {tab === "settings" && canEdit && <SettingsTab state={state} setState={setState} toast={toast.push} />}
+            {tab === "activity" && session && <ActivityFeed roomCode={session.roomCode} presence={collab.presence} selfId={session.userId} />}
+          </main>
+        </div>
+        <TabBar views={views} view={tab} onView={setTab} counts={counts} onMore={() => setShowMore(true)} />
       </div>
 
-      {/* Modals */}
-      {modal&&(
-        <ApptModal appt={modal.appt||null} weekNum={modal.weekNum} dayIdx={modal.dayIdx}
-          timeId={modal.timeId} state={state} onSave={handleApptSave}
-          onClose={()=>setModal(null)} onDelete={handleApptDelete}/>
+      {modal && (
+        <ApptModal appt={modal.appt || null} weekNum={modal.weekNum} dayIdx={modal.dayIdx} timeId={modal.timeId} state={state}
+          readOnly={!canEdit} onSave={handleApptSave} onClose={() => setModal(null)} onDelete={id => { handleApptDelete(id); setModal(null); }} />
       )}
-      {showCollab&&(
-        <CollabModal onJoin={handleJoinRoom} onClose={()=>setShowCollab(false)} defaultName={userName}/>
+      {showCollab && (
+        <CollabModal onCreate={handleCreateRoom} onJoin={handleJoinRoom} onClose={() => setShowCollab(false)} defaultName={userName} initialCode={joinLinkCode} />
       )}
-
-      {syncChoice&&(
-        <Modal title="Which timetable do you want to keep?"
-          subtitle="This browser and your cloud account have different versions"
-          onClose={()=>{ setSyncChoice(null); toast.push("Cloud sync is paused until you sign in again","warn"); }} width={480}>
-          <div style={{padding:20,fontSize:12,lineHeight:1.6,color:"var(--text)"}}>
-            <p style={{margin:"0 0 10px"}}>
-              Your cloud copy{syncChoice.savedAt?` (saved ${new Date(syncChoice.savedAt).toLocaleString()})`:""} has{" "}
-              <b>{Object.keys(syncChoice.remote.appointments||{}).length}</b> sessions.
-              This browser has <b>{Object.keys(state.appointments||{}).length}</b>.
+      {showShare && session && (
+        <ShareModal session={session} onClose={() => setShowShare(false)} toast={toast.push}
+          onUpgrade={collab.upgradeLegacy} onAdminCodeChanged={collab.updateSessionCode} />
+      )}
+      {showMore && (
+        <MoreSheet views={views} view={tab} onView={setTab} onClose={() => setShowMore(false)} theme={theme.resolved} onToggleTheme={theme.toggle}
+          user={user} onSignIn={handleSignIn} onSignOut={handleSignOut} />
+      )}
+      {collab.accessLost && (
+        <AccessLostModal info={collab.accessLost} onClose={collab.clearAccessLost}
+          onJoinAgain={() => { collab.clearAccessLost(); setShowCollab(true); }} />
+      )}
+      {syncChoice && (
+        <Modal title="Which timetable do you want to keep?" subtitle="This browser and your cloud account have different versions"
+          onClose={() => { setSyncChoice(null); toast.push("Cloud sync is paused until you sign in again", "warn"); }} width={480}>
+          <div style={{ padding: 20, fontSize: 14, lineHeight: 1.6 }}>
+            <p style={{ margin: "0 0 10px" }}>
+              Your cloud copy{syncChoice.savedAt ? ` (saved ${new Date(syncChoice.savedAt).toLocaleString()})` : ""} has <b>{Object.keys(syncChoice.remote.appointments || {}).length}</b> sessions.
+              This browser has <b>{Object.keys(state.appointments || {}).length}</b>.
             </p>
-            <p style={{margin:"0 0 16px",color:"var(--muted)"}}>
+            <p style={{ margin: "0 0 16px", color: "var(--muted)" }}>
               Whichever you don't choose is replaced. A backup of this browser's version is kept if you load the cloud copy.
             </p>
-            <div style={{display:"flex",gap:8}}>
-              <Btn variant="primary" onClick={chooseCloudCopy} style={{flex:1,justifyContent:"center"}}>Use cloud copy</Btn>
-              <Btn variant="outline" onClick={keepLocalCopy} style={{flex:1,justifyContent:"center"}}>Keep this browser's copy</Btn>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <Btn variant="primary" size="md" onClick={chooseCloudCopy} style={{ flex: 1 }}>Use cloud copy</Btn>
+              <Btn variant="outline" size="md" onClick={keepLocalCopy} style={{ flex: 1 }}>Keep this browser's copy</Btn>
             </div>
           </div>
         </Modal>
       )}
-
-      <Toasts list={toast.list} dismiss={toast.dismiss}/>
-    </div>
+      <Toasts list={toast.list} dismiss={toast.dismiss} />
+    </CollabCtx.Provider>
     </PresenceCtx.Provider>
   );
 }

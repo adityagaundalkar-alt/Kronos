@@ -230,6 +230,80 @@ describe("two clients through a Firebase-like database", () => {
     await c.join("ERR12345", { userId: "ux", userName: "X" }, true);
     c.pushDiff(state, { ...state, settings: { institution: "changed" } }, "edit");
     await wait();
-    expect(errors.join()).toContain("PERMISSION_DENIED");
+    expect(errors.join()).toMatch(/no longer have permission/);
+  });
+
+  it("a network failure is reported with its code and is not treated as lost access", async () => {
+    const db = makeFakeDb(); let lost = 0; const errors = [];
+    const api = db.api(); api.updateRoom = async () => { const e = new Error("offline"); e.code = "NETWORK_ERROR"; throw e; };
+    let state = sanitize(initial());
+    const c = createRoomClient({ api, getState: () => state, sanitize, applyRemote: () => false, flushMs: 5, quietMs: 0, callbacks: { onError: m => errors.push(m), onAccessLost: () => lost++ } });
+    await c.join("NET12345", { userId: "ux", userName: "X" }, true);
+    c.pushDiff(state, { ...state, settings: { institution: "changed" } }, "edit");
+    await wait();
+    expect(errors.join()).toContain("NETWORK_ERROR");
+    expect(lost).toBe(0);
+  });
+});
+
+
+describe("read-only members and revoked access", () => {
+  it("a read-only member sees the room but never writes to it", async () => {
+    const db = makeFakeDb();
+    const A = makeClient(db, "A", initial()); await A.client.join("ABC12345", { userId: "ua", userName: "A" }, true);
+    const writes = [];
+    const api = db.api();
+    const spy = { ...api, updateRoom: async (...a) => { writes.push(["update", ...a]); return api.updateRoom(...a); }, writeRoomTree: async (...a) => { writes.push(["tree"]); return api.writeRoomTree(...a); }, pushOp: async (...a) => { writes.push(["op"]); } };
+    let state = sanitize({ ...initial(), appointments: {}, courses: [] });
+    const viewer = createRoomClient({ api: spy, getState: () => state, sanitize, flushMs: 5, quietMs: 0,
+      applyRemote: fn => { const raw = fn(state); if (raw === state) return false; state = sanitize(raw); return true; } });
+    await viewer.join("ABC12345", { userId: "uv", userName: "V" }, false, { readOnly: true });
+    await wait();
+    expect(Object.keys(state.appointments).sort()).toEqual(["a1", "a2"]);   // it can read
+    const next = { ...state, appointments: {} };
+    viewer.pushDiff(state, next, "deleted everything");                       // even if the UI let a change through
+    await wait();
+    expect(writes).toEqual([]);                                               // nothing was written
+    expect(viewer.readOnly).toBe(true);
+    // and it still receives other people's changes live
+    A.edit(s => ({ ...s, appointments: { ...s.appointments, a1: { ...s.appointments.a1, roomId: "r2" } } }));
+    await wait();
+    expect(state.appointments.a1.roomId).toBe("r2");
+  });
+
+  it("an owner joining read-only does not overwrite the room with local data", async () => {
+    const db = makeFakeDb();
+    const A = makeClient(db, "A", initial()); await A.client.join("ABC12345", { userId: "ua", userName: "A" }, true);
+    const other = makeClient(db, "O", { ...initial(), appointments: {} });
+    other.client.leave();
+    await other.client.join("ABC12345", { userId: "uo", userName: "O" }, true, { readOnly: true });
+    await wait();
+    expect(Object.keys(db.rooms.ABC12345.flat).some(p => p.startsWith("appointments/a1"))).toBe(true);
+  });
+
+  it("reports lost access when the database refuses a write", async () => {
+    const db = makeFakeDb();
+    const api = db.api();
+    let lost = 0; const errors = [];
+    let state = sanitize(initial());
+    const c = createRoomClient({ api: { ...api, updateRoom: async () => { throw Object.assign(new Error("denied"), { code: "PERMISSION_DENIED" }); } },
+      getState: () => state, sanitize, flushMs: 5, quietMs: 0, applyRemote: () => false,
+      callbacks: { onAccessLost: () => lost++, onError: m => errors.push(m) } });
+    await c.join("ABC12345", { userId: "u", userName: "U" }, true);
+    c.pushDiff(state, { ...state, appointments: {} }, "x");
+    await wait();
+    expect(lost).toBe(1);
+    expect(errors[0]).toMatch(/no longer have permission/);
+  });
+
+  it("reports lost access when listening is refused", async () => {
+    const db = makeFakeDb();
+    const api = db.api();
+    let lost = 0; let state = sanitize(initial());
+    const c = createRoomClient({ api: { ...api, subscribeRoom: (code, on, onErr) => { setTimeout(() => onErr(new Error("denied")), 3); return () => {}; } },
+      getState: () => state, sanitize, flushMs: 5, quietMs: 0, applyRemote: () => false, callbacks: { onAccessLost: () => lost++ } });
+    await c.join("ABC12345", { userId: "u", userName: "U" }, true);
+    await wait();
+    expect(lost).toBe(1);
   });
 });

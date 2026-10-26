@@ -2,18 +2,69 @@
   "rules": {
     ".read": false,
     ".write": false,
-
     "users": {
       "$uid": {
-        ".read":  "auth != null && auth.uid === $uid && auth.token.firebase.sign_in_provider !== 'anonymous'",
+        ".read": "auth != null && auth.uid === $uid && auth.token.firebase.sign_in_provider !== 'anonymous'",
         ".write": "auth != null && auth.uid === $uid && auth.token.firebase.sign_in_provider !== 'anonymous'"
       }
     },
-
-    "rooms": {
+    "codes": {
       "$code": {
-        ".read":  "auth != null && $code.matches(/^[A-Z0-9]{6,8}$/)",
-        ".write": "auth != null && $code.matches(/^[A-Z0-9]{6,8}$/)"
+        ".read": "auth != null && $code.matches(/^[A-Z0-9]{6,12}$/)",
+        ".write": "auth != null && $code.matches(/^[A-Z0-9]{6,12}$/) && ((!data.exists() && newData.child('rid').isString() && (root.child('rooms/'+newData.child('rid').val()+'/secrets/admin').exists() && root.child('rooms/'+newData.child('rid').val()+'/access/'+root.child('rooms/'+newData.child('rid').val()+'/secrets/admin').val()+'/'+auth.uid).exists())) || (data.exists() && (root.child('rooms/'+data.child('rid').val()+'/secrets/admin').exists() && root.child('rooms/'+data.child('rid').val()+'/access/'+root.child('rooms/'+data.child('rid').val()+'/secrets/admin').val()+'/'+auth.uid).exists())))",
+        ".validate": "newData.hasChildren(['rid','role']) && newData.child('rid').isString() && (newData.child('role').val() === 'admin' || newData.child('role').val() === 'editor' || newData.child('role').val() === 'viewer')"
+      }
+    },
+    "rooms": {
+      "$rid": {
+        "meta": {
+          ".read": "auth != null && $rid.matches(/^[A-Za-z0-9]{6,24}$/) && (!root.child('rooms/'+$rid+'/secrets').exists() || (root.child('rooms/'+$rid+'/secrets/admin').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/admin').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/editor').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/editor').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/viewer').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/viewer').val()+'/'+auth.uid).exists()))",
+          ".write": "auth != null && $rid.matches(/^[A-Za-z0-9]{6,24}$/) && (!root.child('rooms/'+$rid+'/secrets').exists() || (root.child('rooms/'+$rid+'/secrets/admin').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/admin').val()+'/'+auth.uid).exists()))"
+        },
+        "v2": {
+          ".read": "auth != null && $rid.matches(/^[A-Za-z0-9]{6,24}$/) && (!root.child('rooms/'+$rid+'/secrets').exists() || (root.child('rooms/'+$rid+'/secrets/admin').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/admin').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/editor').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/editor').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/viewer').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/viewer').val()+'/'+auth.uid).exists()))",
+          ".write": "auth != null && $rid.matches(/^[A-Za-z0-9]{6,24}$/) && (!root.child('rooms/'+$rid+'/secrets').exists() || (root.child('rooms/'+$rid+'/secrets/admin').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/admin').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/editor').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/editor').val()+'/'+auth.uid).exists()))"
+        },
+        "state": {
+          ".read": "auth != null && $rid.matches(/^[A-Za-z0-9]{6,24}$/) && (!root.child('rooms/'+$rid+'/secrets').exists() || (root.child('rooms/'+$rid+'/secrets/admin').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/admin').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/editor').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/editor').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/viewer').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/viewer').val()+'/'+auth.uid).exists()))",
+          ".write": "auth != null && $rid.matches(/^[A-Za-z0-9]{6,24}$/) && (!root.child('rooms/'+$rid+'/secrets').exists() || (root.child('rooms/'+$rid+'/secrets/admin').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/admin').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/editor').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/editor').val()+'/'+auth.uid).exists()))"
+        },
+        "ops": {
+          ".read": "auth != null && $rid.matches(/^[A-Za-z0-9]{6,24}$/) && (!root.child('rooms/'+$rid+'/secrets').exists() || (root.child('rooms/'+$rid+'/secrets/admin').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/admin').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/editor').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/editor').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/viewer').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/viewer').val()+'/'+auth.uid).exists()))",
+          ".write": "auth != null && $rid.matches(/^[A-Za-z0-9]{6,24}$/) && (!root.child('rooms/'+$rid+'/secrets').exists() || (root.child('rooms/'+$rid+'/secrets/admin').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/admin').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/editor').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/editor').val()+'/'+auth.uid).exists()))"
+        },
+        "presence": {
+          ".read": "auth != null && $rid.matches(/^[A-Za-z0-9]{6,24}$/) && (!root.child('rooms/'+$rid+'/secrets').exists() || (root.child('rooms/'+$rid+'/secrets/admin').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/admin').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/editor').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/editor').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/viewer').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/viewer').val()+'/'+auth.uid).exists()))",
+          ".write": "auth != null && $rid.matches(/^[A-Za-z0-9]{6,24}$/) && (!root.child('rooms/'+$rid+'/secrets').exists() || (root.child('rooms/'+$rid+'/secrets/admin').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/admin').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/editor').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/editor').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/viewer').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/viewer').val()+'/'+auth.uid).exists()))"
+        },
+        "comments": {
+          ".read": "auth != null && $rid.matches(/^[A-Za-z0-9]{6,24}$/) && (!root.child('rooms/'+$rid+'/secrets').exists() || (root.child('rooms/'+$rid+'/secrets/admin').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/admin').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/editor').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/editor').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/viewer').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/viewer').val()+'/'+auth.uid).exists()))",
+          "$cid": {
+            ".write": "auth != null && $rid.matches(/^[A-Za-z0-9]{6,24}$/) && (!root.child('rooms/'+$rid+'/secrets').exists() || (root.child('rooms/'+$rid+'/secrets/admin').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/admin').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/editor').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/editor').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/viewer').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/viewer').val()+'/'+auth.uid).exists())) && (!data.exists() ? newData.child('uid').val() === auth.uid : (data.child('uid').val() === auth.uid || (!root.child('rooms/'+$rid+'/secrets').exists() || (root.child('rooms/'+$rid+'/secrets/admin').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/admin').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/editor').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/editor').val()+'/'+auth.uid).exists()))))",
+            ".validate": "newData.hasChildren(['apptId','uid','name','text','at']) && newData.child('text').isString() && newData.child('text').val().length > 0 && newData.child('text').val().length <= 2000 && (!data.exists() || newData.child('uid').val() === data.child('uid').val())"
+          }
+        },
+        "secrets": {
+          ".write": "auth != null && $rid.matches(/^[A-Za-z0-9]{6,24}$/) && ((!data.exists() && (!root.child('rooms/'+$rid+'/meta').exists() || root.child('rooms/'+$rid+'/meta/ownerId').val() === auth.uid)) || (root.child('rooms/'+$rid+'/secrets/admin').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/admin').val()+'/'+auth.uid).exists()))",
+          "admin": {
+            ".read": "auth != null && $rid.matches(/^[A-Za-z0-9]{6,24}$/) && (root.child('rooms/'+$rid+'/secrets/admin').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/admin').val()+'/'+auth.uid).exists())"
+          },
+          "editor": {
+            ".read": "auth != null && $rid.matches(/^[A-Za-z0-9]{6,24}$/) && ((root.child('rooms/'+$rid+'/secrets/admin').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/admin').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/editor').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/editor').val()+'/'+auth.uid).exists()))"
+          },
+          "viewer": {
+            ".read": "auth != null && $rid.matches(/^[A-Za-z0-9]{6,24}$/) && ((root.child('rooms/'+$rid+'/secrets/admin').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/admin').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/editor').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/editor').val()+'/'+auth.uid).exists()) || (root.child('rooms/'+$rid+'/secrets/viewer').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/viewer').val()+'/'+auth.uid).exists()))"
+          }
+        },
+        "access": {
+          "$code": {
+            ".write": "auth != null && $rid.matches(/^[A-Za-z0-9]{6,24}$/) && (root.child('rooms/'+$rid+'/secrets/admin').exists() && root.child('rooms/'+$rid+'/access/'+root.child('rooms/'+$rid+'/secrets/admin').val()+'/'+auth.uid).exists())",
+            "$uid": {
+              ".read": "auth != null && auth.uid === $uid",
+              ".write": "auth != null && $rid.matches(/^[A-Za-z0-9]{6,24}$/) && $uid === auth.uid && ((newData.val() === true && $code.matches(/^[A-Z0-9]{6,12}$/) && (root.child('rooms/'+$rid+'/secrets/admin').val() === $code || root.child('rooms/'+$rid+'/secrets/editor').val() === $code || root.child('rooms/'+$rid+'/secrets/viewer').val() === $code)) || !newData.exists())"
+            }
+          }
+        }
       }
     }
   }
