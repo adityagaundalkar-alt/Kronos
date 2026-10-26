@@ -52,7 +52,7 @@ export function Rail({ views, view, onView, counts, theme, onToggleTheme, user, 
             <button type="button" className="nav-item" onClick={onSignOut} title="Sign out"><Icon name="logout" size={19} /><span className="label">Sign out</span></button>
           </>
         ) : (
-          <button type="button" className="nav-item" onClick={onSignIn} title={signedInHint}><Icon name="person" size={19} /><span className="label">Sign in to save</span></button>
+          <button type="button" className="nav-item" onClick={onSignIn} title={signedInHint}><Icon name="person" size={19} /><span className="label">Sign in</span></button>
         )}
       </div>
     </aside>
@@ -91,7 +91,7 @@ export function MoreSheet({ views, view, onView, onClose, theme, onToggleTheme, 
         </button>
         {user
           ? <button type="button" onClick={() => { onSignOut(); onClose(); }} style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "13px 12px", fontSize: 16, fontWeight: 500, textAlign: "left" }}><Icon name="logout" size={20} />Sign out ({user.displayName || user.email})</button>
-          : <button type="button" onClick={() => { onSignIn(); onClose(); }} style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "13px 12px", fontSize: 16, fontWeight: 500, textAlign: "left" }}><Icon name="person" size={20} />Sign in to save</button>}
+          : <button type="button" onClick={() => { onSignIn(); onClose(); }} style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "13px 12px", fontSize: 16, fontWeight: 500, textAlign: "left" }}><Icon name="person" size={20} />Sign in</button>}
       </div>
     </Modal>
   );

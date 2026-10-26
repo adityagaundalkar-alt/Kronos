@@ -19,7 +19,7 @@ export default function LoginScreen({ onSkip }) {
           <div>
             <h1 style={{ font: "400 clamp(40px, 6vw, 68px)/1.02 var(--serif)", letterSpacing: "-.01em", maxWidth: "12ch" }}>Every class in its place.</h1>
             <p style={{ color: "var(--ink-text)", fontSize: 17, lineHeight: 1.5, maxWidth: "38ch", marginTop: 16 }}>
-              Build the teaching timetable with your team, catch clashes before students do, and share a read-only view with instructors.
+              Build each term's timetable with your team, catch clashes before students do, and share a read-only view with instructors.
             </p>
           </div>
           <div aria-hidden="true" style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 4, maxWidth: 360, opacity: .9 }}>
@@ -31,7 +31,7 @@ export default function LoginScreen({ onSkip }) {
         </section>
         <section style={{ padding: "clamp(24px, 5vw, 56px)", display: "flex", flexDirection: "column", justifyContent: "center", maxWidth: 520 }}>
           <h2 style={{ font: "400 32px/1.1 var(--serif)", marginBottom: 8 }}>Welcome</h2>
-          <p style={{ color: "var(--muted)", marginBottom: 22, lineHeight: 1.5 }}>Sign in to keep your timetable in the cloud and open it from any device. You can also start without an account.</p>
+          <p style={{ color: "var(--muted)", marginBottom: 22, lineHeight: 1.5 }}>Sign in to see your terms on any device. You can also start without an account.</p>
           <Btn variant="outline" size="md" onClick={handleGoogle} disabled={loading} style={{ width: "100%", minHeight: 46, marginBottom: 10 }}>
             <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
               <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z" />
@@ -43,7 +43,7 @@ export default function LoginScreen({ onSkip }) {
           </Btn>
           {error && <div className="callout bad" role="alert" style={{ marginBottom: 10 }}>{error}</div>}
           <Btn variant="primary" size="md" onClick={onSkip} style={{ width: "100%", minHeight: 46 }}>Continue without an account</Btn>
-          <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 16, lineHeight: 1.5 }}>Without an account, your timetable stays in this browser. Joining a shared room never needs an account.</p>
+          <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 16, lineHeight: 1.5 }}>Without an account, your list of terms stays in this browser. Joining a term with a code never needs an account.</p>
         </section>
       </div>
     </main>

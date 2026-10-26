@@ -152,5 +152,10 @@ export function createAccess(store, getUid) {
     return { rid, codes, role: "admin" };
   }
 
-  return { createRoom, resolve, join, getCodes, rotate, disableViewer, enableViewer, upgradeLegacy };
+  /** Archive a term (read-only for everyone, including admins) or reopen it. Admins only: the rules enforce it. */
+  async function setArchived(rid, archived) {
+    await store.set(`rooms/${rid}/meta/archived`, archived ? true : null);
+  }
+
+  return { createRoom, resolve, join, getCodes, rotate, disableViewer, enableViewer, upgradeLegacy, setArchived };
 }

@@ -3,7 +3,7 @@
 // roomClient.js; roles and codes live in access.js and the database rules.
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { auth, ensureAuth, loadRoom, writeRoomTree, updateRoom, subscribeRoom, pushOp, subscribePresence, joinPresence,
-  access, getRoomMeta, subscribeComments, newCommentId, saveComment, patchComment, deleteComment } from "../firebase.js";
+  access, getRoomMeta, subscribeMeta, subscribeComments, newCommentId, saveComment, patchComment, deleteComment } from "../firebase.js";
 import { createRoomClient } from "../roomClient.js";
 import { uid, USER_COLORS, userColor } from "../constants.js";
 import { rememberRoom } from "../state.js";
@@ -67,6 +67,17 @@ export function useCollaboration({ getState, applyRemote, toast, sanitize, backu
     await client.join(rid, { userId: sess.userId, userName }, !!create, { readOnly: role === "viewer" });
     sessionRef.current = sess; setSession(sess); setAccessLost(null);
     cleanupRef.current.push(subscribePresence(rid, setRawPresence));
+    cleanupRef.current.push(subscribeMeta(rid, m => {            // the term's name, and whether an admin has archived it
+      const cur = sessionRef.current;
+      if (!cur || cur.rid !== rid) return;
+      const archived = m.archived === true, name = m.name || cur.roomName;
+      client.setReadOnly(cur.role === "viewer" || archived);
+      if (archived !== !!cur.archived || name !== cur.roomName) {
+        const next = { ...cur, archived, roomName: name };
+        sessionRef.current = next; setSession(next);
+        rememberRoom(cur.code, name, cur.role, archived);
+      }
+    }, () => {}));
     cleanupRef.current.push(subscribeComments(rid, (id, v) => setCommentMap(m => applyCommentEvent(m, id, v)), () => {}));
     presenceCtl.current = joinPresence(rid, sess.userId, { name: userName, color: sess.userColor, role, tab: "schedule", editing: null });
     const t = setInterval(() => setTick(x => x + 1), 15000); // re-evaluate who is stale
@@ -84,7 +95,7 @@ export function useCollaboration({ getState, applyRemote, toast, sanitize, backu
       try { roomName = (await getRoomMeta(found.rid))?.name || ""; } catch { /* viewers of some rooms can't read meta */ }
       const sess = await attach({ ...found, roomName }, userName);
       rememberRoom(found.code, roomName, found.role);
-      return sess;
+      return sessionRef.current || sess;
     } finally { busy.current = false; }
   }
 
@@ -127,6 +138,13 @@ export function useCollaboration({ getState, applyRemote, toast, sanitize, backu
     const ok = await rejoin();
     if (ok) toast("Your access to the room was refreshed", "info");
   };
+
+  /** Archive the open term (read-only for everybody) or reopen it. Admins only. */
+  async function setArchived(archived) {
+    const s = sessionRef.current;
+    if (!s) return;
+    await access.setArchived(s.rid, archived); // the meta listener updates the session
+  }
 
   /** Give an old room roles (creator only). Other people rejoin with the old code, which now means "editor". */
   async function upgradeLegacy() {
@@ -199,8 +217,8 @@ export function useCollaboration({ getState, applyRemote, toast, sanitize, backu
 
   const role = session?.role || null;
   return {
-    session, role, canEdit: !session || can(role, "edit"), presence, syncing, lastSyncAt,
+    session, role, canEdit: !session || (can(role, "edit") && !session.archived), archived: !!session?.archived, presence, syncing, lastSyncAt,
     comments, commentApi, accessLost, clearAccessLost: () => setAccessLost(null),
-    joinRoom, createRoom, leaveRoom, rejoin, upgradeLegacy, updateSessionCode, pushDiff, setPresenceFields,
+    joinRoom, createRoom, leaveRoom, rejoin, setArchived, upgradeLegacy, updateSessionCode, pushDiff, setPresenceFields,
   };
 }

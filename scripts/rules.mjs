@@ -13,6 +13,7 @@ const isEditor = `(${has("editor")})`;
 const isViewer = `(${has("viewer")})`;
 const canEdit = `(${legacyOpen} || ${isAdmin} || ${isEditor})`;
 const isMember = `(${legacyOpen} || ${isAdmin} || ${isEditor} || ${isViewer})`;
+const notArchived = `root.child('rooms/'+$rid+'/meta/archived').val() !== true`; // an archived term is read-only for everyone
 const authed = `auth != null && ${validRid}`;
 
 const read = cond => `${authed} && ${cond}`;
@@ -50,15 +51,15 @@ export function buildRules() {
           },
           v2: {
             ".read": read(isMember),
-            ".write": read(canEdit),
+            ".write": read(`${canEdit} && ${notArchived}`),
           },
           state: {
             ".read": read(isMember),
-            ".write": read(canEdit),
+            ".write": read(`${canEdit} && ${notArchived}`),
           },
           ops: {
             ".read": read(isMember),
-            ".write": read(canEdit),
+            ".write": read(`${canEdit} && ${notArchived}`),
           },
           presence: {
             ".read": read(isMember),
@@ -69,7 +70,7 @@ export function buildRules() {
           comments: {
             ".read": read(isMember),
             $cid: {
-              ".write": read(`${isMember} && (!data.exists() ? newData.child('uid').val() === auth.uid : (data.child('uid').val() === auth.uid || ${canEdit}))`),
+              ".write": read(`${isMember} && ${notArchived} && (!data.exists() ? newData.child('uid').val() === auth.uid : (data.child('uid').val() === auth.uid || ${canEdit}))`),
               ".validate": "newData.hasChildren(['apptId','uid','name','text','at']) && newData.child('text').isString() && newData.child('text').val().length > 0 && newData.child('text').val().length <= 2000 && (!data.exists() || newData.child('uid').val() === data.child('uid').val())",
             },
           },

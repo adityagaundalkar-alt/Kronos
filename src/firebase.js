@@ -86,17 +86,7 @@ export const ensureAuth = async () => {
   }
 };
 
-// --- User Cloud Save (Solo Mode) ---
-export const saveUserState = async (uid, state) => {
-  await set(ref(db, `users/${uid}`), { ...state, _savedAt: Date.now() });
-};
-
-export const loadUserState = async (uid) => {
-  const snapshot = await get(ref(db, `users/${uid}`));
-  return snapshot.exists() ? snapshot.val() : null;
-};
-
-// --- Collaboration (Room Mode) ---
+// --- Terms (shared by everyone who joins them) ---
 // Layout:  codes/<CODE>                 { rid, role }   what a join code opens (see access.js)
 //          rooms/<rid>/meta             { name, ownerId, createdAt }
 //          rooms/<rid>/secrets/<role>   the room's admin / editor / viewer codes (role-restricted reads)
@@ -118,6 +108,17 @@ const store = {
 export const access = createAccess(store, () => auth.currentUser?.uid || null);
 
 export const getRoomMeta = async (rid) => store.get(`rooms/${rid}/meta`);
+/** Live term details (name, archived). onChange gets {} when there is nothing yet. */
+export const subscribeMeta = (rid, onChange, onError) =>
+  onValue(roomRef(rid, "meta"), (snap) => onChange(snap.val() || {}), onError);
+
+// --- The terms a signed-in person belongs to (private to them; lets any device list them) ---
+export const listMyTerms = async (uid) => {
+  const v = await store.get(`users/${uid}/terms`);
+  return v ? Object.values(v).filter((t) => t && t.code) : [];
+};
+export const saveMyTerm = (uid, term) => set(ref(db, `users/${uid}/terms/${term.code}`), term);
+export const removeMyTerm = (uid, code) => remove(ref(db, `users/${uid}/terms/${code}`));
 
 /** Returns { tree } (v2 data), { legacy } (old whole-state blob) or null. */
 export const loadRoom = async (code) => {
