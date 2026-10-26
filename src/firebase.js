@@ -24,6 +24,7 @@ import {
   limitToLast
 } from "firebase/database";
 import { COLLECTIONS } from "./sync.js";
+import { createAccess } from "./access.js";
 
 // Web API keys are not secrets; access is controlled by the Realtime Database
 // rules (see database.rules.json).
@@ -96,26 +97,27 @@ export const loadUserState = async (uid) => {
 };
 
 // --- Collaboration (Room Mode) ---
-// Layout:  rooms/<code>/meta          { name, ownerId, createdAt }
-//          rooms/<code>/v2/<col>/<id> one node per item (see sync.js)
-//          rooms/<code>/ops/<key>     activity log
-//          rooms/<code>/presence/<id> who is online / editing what
-//          rooms/<code>/state         LEGACY whole-timetable blob (read once to migrate)
+// Layout:  codes/<CODE>                 { rid, role }   what a join code opens (see access.js)
+//          rooms/<rid>/meta             { name, ownerId, createdAt }
+//          rooms/<rid>/secrets/<role>   the room's admin / editor / viewer codes (role-restricted reads)
+//          rooms/<rid>/access/<CODE>/<uid>  who joined with which code
+//          rooms/<rid>/v2/<col>/<id>    one node per item (see sync.js)
+//          rooms/<rid>/comments/<id>    comments on sessions
+//          rooms/<rid>/ops/<key>        activity log
+//          rooms/<rid>/presence/<id>    who is online / editing what
+//          rooms/<rid>/state            LEGACY whole-timetable blob (read once to migrate)
 const roomRef = (code, path = "") => ref(db, `rooms/${code}${path ? "/" + path : ""}`);
 
-export const registerRoom = (code, name, ownerId) =>
-  set(roomRef(code, "meta"), { name, ownerId, createdAt: Date.now() });
-
-export const roomExists = async (code) => {
-  if ((await get(roomRef(code, "meta"))).exists()) return true;
-  if ((await get(roomRef(code, "v2/config"))).exists()) return true;
-  return (await get(roomRef(code, "state"))).exists();
+/** Database paths as a tiny get/set/update/remove interface (what access.js is written against). */
+const store = {
+  get: async (path) => { const s = await get(ref(db, path)); return s.exists() ? s.val() : null; },
+  set: (path, value) => set(ref(db, path), value),
+  update: (path, obj) => update(ref(db, path), obj),
+  remove: (path) => remove(ref(db, path)),
 };
+export const access = createAccess(store, () => auth.currentUser?.uid || null);
 
-export const getRoomMeta = async (code) => {
-  const s = await get(roomRef(code, "meta"));
-  return s.exists() ? s.val() : null;
-};
+export const getRoomMeta = async (rid) => store.get(`rooms/${rid}/meta`);
 
 /** Returns { tree } (v2 data), { legacy } (old whole-state blob) or null. */
 export const loadRoom = async (code) => {
@@ -148,6 +150,21 @@ export const subscribeRoom = (code, onChange, onError) => {
   unsubs.push(onValue(roomRef(code, "v2/config"), (snap) => onChange("config", undefined, snap.val()), onError));
   return () => unsubs.forEach((u) => { try { u(); } catch { /* already detached */ } });
 };
+
+// --- Comments on sessions ---
+export const subscribeComments = (rid, onChange, onError) => {
+  const r = roomRef(rid, "comments");
+  const unsubs = [
+    onChildAdded(r, (snap) => onChange(snap.key, snap.val()), onError),
+    onChildChanged(r, (snap) => onChange(snap.key, snap.val()), onError),
+    onChildRemoved(r, (snap) => onChange(snap.key, null), onError),
+  ];
+  return () => unsubs.forEach((u) => { try { u(); } catch { /* already detached */ } });
+};
+export const newCommentId = (rid) => push(roomRef(rid, "comments")).key;
+export const saveComment = (rid, id, comment) => set(roomRef(rid, `comments/${id}`), comment);
+export const patchComment = (rid, id, fields) => update(roomRef(rid, `comments/${id}`), fields);
+export const deleteComment = (rid, id) => remove(roomRef(rid, `comments/${id}`));
 
 // --- Activity log ---
 export const pushOp = (code, op) => push(roomRef(code, "ops"), op);
