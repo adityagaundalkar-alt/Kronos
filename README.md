@@ -9,7 +9,7 @@ A full-featured academic timetable scheduling app built with React + Vite.
 - Comments on sessions (viewers can comment too), with open-comment badges and a Comments view
 - Responsive layout (phone agenda view, bottom tab bar), light and dark themes
 - Dashboard with load charts and session analytics
-- Collaborative rooms with live presence and per-item sync (Firebase)
+- Terms: each term has its own timetable that the whole team edits together live (Firebase). Start a term from scratch, or reuse the instructors, rooms and groups of an earlier one. Finished terms can be archived (read-only) and stay listed under "Older terms"
 - Optional custom start/end times for a session inside a slot (e.g. 10:00–11:30 in a 09:00–12:00 slot); clashes are detected by real time overlap, back-to-back sessions are fine
 - Courses, instructors, rooms, student groups management
 - Export to CSV / JSON
@@ -48,20 +48,20 @@ That's it. You get a live `https://kronos-timetable.vercel.app` URL.
 
 ---
 
-## Real-time collaboration (Firebase)
+## Terms and real-time collaboration (Firebase)
 
-Teams collaborate by sharing codes. Every room has three codes, one per role:
+Everyone works inside a **term**. The first screen lists the terms you belong to (this browser's list, plus your account's if you sign in with Google), with older, archived terms in their own section. From there you can start a new term (empty, or reusing the instructors, rooms, student groups and time slots of an earlier term; classes are never copied) or join one with a code. Every term has three codes, one per role:
 
 | Role | Can do | Gets it by |
 |------|--------|-----------|
-| Admin | everything, plus share links and changing codes | the code shown once to the room's creator |
+| Admin | everything, plus share links and changing codes | the code shown once to the term's creator |
 | Editor | edit the timetable and comment | the editor code or link |
 | View only | read the timetable and comment | the read-only code or link |
 
 Anyone joins with just a code (or a `?join=CODE` link). No account is needed. The database
 rules enforce the roles, so a viewer can't edit even by tampering with the app, and viewers
 never see the editor or admin codes. An admin can change a code (everyone holding the old
-one is locked out) or turn the read-only link off and on.
+one is locked out), turn the read-only link off and on, or **archive** the term: it becomes read-only for everybody (no edits, no new comments) until an admin reopens it.
 
 Each change is saved per item (a session, a course, a room...) so two people editing at once
 don't overwrite each other, and deletions stay deleted. You can see who is online and which
@@ -70,8 +70,9 @@ session each person has open.
 Notes:
 - Admin rights belong to the browser (anonymous identity) that created or joined with the admin
   code, so save the admin code to get them back on another device.
-- Rooms made before roles existed keep working: everyone with the code can edit. The room's
+- Terms made before roles existed keep working: everyone with the code can edit. Their
   creator can switch on roles from the Share dialog; the old code then becomes the editor code.
+- To start fresh, delete the old `rooms`, `codes` and `users` nodes in the Realtime Database console. The app no longer keeps a personal cloud copy, and demo data is gone.
 
 The Firebase project is configured in `src/firebase.js`. To set up or secure it:
 

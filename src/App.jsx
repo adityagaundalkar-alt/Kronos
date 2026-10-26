@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback, useRef, useMemo, useContext } from "react";
-import { signInWithGoogle, explainAuthError, signOutUser, ensureAuth, loadUserState, saveUserState, onAuthChange } from "./firebase.js";
+import { signInWithGoogle, explainAuthError, signOutUser, ensureAuth, onAuthChange, access, loadRoom, listMyTerms, saveMyTerm, removeMyTerm } from "./firebase.js";
 import { iso, parseISO, addDays, fmt, fmtLong, getWeekStart, slotDate } from "./dates.js";
-import { same } from "./sync.js";
+import { treeToState } from "./sync.js";
 import { checkConflicts, getAllConflicts } from "./conflicts.js";
 import { slotRange, customLabel, timeLabel, startKey, validateCustomTimes, fromMinutes } from "./timeslots.js";
 import { DAYS, DAYS_FULL, WEEKS, PALETTE, ROOM_TYPES, CATEGORIES, uid, initials, getPalette, paletteById } from "./constants.js";
-import { seed, sanitizeState, loadLocal, saveLocal, backupLocalState } from "./state.js";
+import { emptyState, termFrom, sanitizeState, loadLocal, saveLocal, backupLocalState, loadRecentRooms, forgetRoom } from "./state.js";
 import { PresenceCtx, CollabCtx } from "./collab/context.js";
 import { Badge, Btn, Modal, Field, MultiSelect, EmptyState, Segmented, Avatar, useMedia, useTheme, useToasts, Toasts } from "./ui/kit.jsx";
 import Icon from "./ui/Icon.jsx";
@@ -17,6 +17,7 @@ import { CollabModal, ShareModal, RoomBar, AccessLostModal, ActivityFeed, RolePi
 import { codeFromSearch, ROLE_LABEL } from "./access.js";
 import { Rail, TabBar, MoreSheet, visibleViews, VIEWS } from "./shell/Shell.jsx";
 import LoginScreen from "./shell/Login.jsx";
+import TermsScreen from "./shell/Terms.jsx";
 
 // ═══════════════════════════════════════════════════════════════════
 //  APPOINTMENT MODAL
@@ -1840,9 +1841,9 @@ function SettingsTab({state,setState,toast}) {
     reader.readAsText(file);
   }
   function resetData() {
-    if(confirm("Reset all data to defaults? This cannot be undone.")) {
-      setState(seed());
-      toast("Data reset to defaults","warn");
+    if(confirm("Clear everything in this term (courses, instructors, rooms, groups and sessions)? This cannot be undone.")) {
+      setState(emptyState(state.settings.semester));
+      toast("Term cleared","warn");
     }
   }
 
@@ -1943,34 +1944,29 @@ const writeName = n => { try { localStorage.setItem("kronos_user", n); } catch {
 export default function TimetableBuilder() {
   const { user, authUid, loading: authLoading } = useAuth();
   const theme = useTheme();
-  const isPhone = useMedia("(max-width: 760px)");
   const [joinLinkCode] = useState(() => codeFromSearch(typeof window !== "undefined" ? window.location.search : ""));
   const [skipAuth, setSkipAuth] = useState(!!joinLinkCode);
-  const [state, setStateRaw] = useState(() => sanitizeState(loadLocal()) || seed());
+  const [state, setStateRaw] = useState(() => sanitizeState(loadLocal()) || emptyState());
   const [tab, setTab] = useState("schedule");
   const [modal, setModal] = useState(null);
-  const [showCollab, setShowCollab] = useState(!!joinLinkCode);
+  const [showCollab, setShowCollab] = useState(joinLinkCode ? "join" : null); // null | "create" | "join"
+  const [localMode, setLocalMode] = useState(false);   // working on this device only, without a team
+  const [termList, setTermList] = useState(loadRecentRooms);
+  const [openingCode, setOpeningCode] = useState("");
+  const [pendingCode, setPendingCode] = useState(""); // a term chosen from the list that still needs the person's name
+  const [termsError, setTermsError] = useState("");
   const [showShare, setShowShare] = useState(false);
   const [showMore, setShowMore] = useState(false);
   const [userName, setUserName] = useState(readName);
-  const [cloudSaving, setCloudSaving] = useState(false);
-  const [cloudError, setCloudError] = useState(false);
-  const [lastCloudSave, setLastCloudSave] = useState(null);
-  const [syncChoice, setSyncChoice] = useState(null); // {remote, savedAt} when local and cloud copies differ
   const stateRef = useRef(state);          // always the latest state, readable outside render
-  const cloudReadyRef = useRef(false);     // false until we know whether to trust local or cloud
-  const saveTimerRef = useRef(null);
-  const pendingCloudRef = useRef(null);    // latest unsaved state for the signed-in user
-  const userRef = useRef(null);
   const toast = useToasts();
-  userRef.current = user;
 
   // A share link (?join=CODE) is consumed once: tidy the address bar so a refresh doesn't reopen it.
   useEffect(() => {
     if (joinLinkCode) { try { window.history.replaceState(null, "", window.location.pathname); } catch { /* ignore */ } }
   }, [joinLinkCode]);
 
-  // All state changes go through here. Side effects (local save, room sync, cloud save) happen
+  // All state changes go through here. Side effects (local save, term sync) happen
   // OUTSIDE React's state updater so they run exactly once.
   const commit = useCallback(next => { stateRef.current = next; setStateRaw(next); saveLocal(next); }, []);
 
@@ -1985,91 +1981,19 @@ export default function TimetableBuilder() {
   const collab = useCollaboration({ getState: () => stateRef.current, applyRemote, toast: toast.push, sanitize: sanitizeState, backup: backupLocalState });
   const { session, canEdit } = collab;
 
-  // ── Cloud save (signed-in solo use): debounced, flushed on exit, errors shown ──
-  const flushCloudSave = useCallback(async () => {
-    clearTimeout(saveTimerRef.current);
-    const job = pendingCloudRef.current, u = userRef.current;
-    if (!job || !u || !cloudReadyRef.current) return;
-    pendingCloudRef.current = null;
-    try {
-      await saveUserState(u.uid, job);
-      setCloudError(false); setLastCloudSave(Date.now());
-    } catch {
-      pendingCloudRef.current = job; // keep it so the next change retries
-      setCloudError(true);
-      toast.push("Couldn't save to the cloud. Your changes are kept on this device.", "warn");
-    }
-    setCloudSaving(pendingCloudRef.current !== null);
-  }, [toast.push]);
-  const scheduleCloudSave = useCallback(next => {
-    if (!userRef.current || !cloudReadyRef.current) return;
-    pendingCloudRef.current = next;
-    setCloudSaving(true);
-    clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(flushCloudSave, 2000);
-  }, [flushCloudSave]);
-
-  // Warn before closing the tab while a cloud save is still pending; try to flush when hidden.
-  useEffect(() => {
-    const onUnload = e => { if (pendingCloudRef.current) { flushCloudSave(); e.preventDefault(); e.returnValue = ""; } };
-    const onHide = () => { if (document.visibilityState === "hidden") flushCloudSave(); };
-    window.addEventListener("beforeunload", onUnload);
-    document.addEventListener("visibilitychange", onHide);
-    return () => { window.removeEventListener("beforeunload", onUnload); document.removeEventListener("visibilitychange", onHide); };
-  }, [flushCloudSave]);
-
-  // ── On sign-in: never silently replace local work with the cloud copy (or vice-versa) ──
-  useEffect(() => {
-    cloudReadyRef.current = false; pendingCloudRef.current = null; clearTimeout(saveTimerRef.current);
-    setCloudSaving(false); setCloudError(false); setSyncChoice(null);
-    if (!user) return;
-    const n = user.displayName || user.email || "";
-    setUserName(n); writeName(n);
-    let cancelled = false;
-    (async () => {
-      try {
-        const remote = await loadUserState(user.uid);
-        if (cancelled) return;
-        const local = stateRef.current;
-        if (!remote) { cloudReadyRef.current = true; scheduleCloudSave(local); return; } // first sign-in: upload what's here
-        const { _savedAt, ...appState } = remote;
-        const clean = sanitizeState(appState);
-        if (same({ ...clean, changelog: [] }, { ...local, changelog: [] })) { cloudReadyRef.current = true; return; }
-        setSyncChoice({ remote: clean, savedAt: _savedAt || null }); // wait for the person to choose
-      } catch {
-        if (cancelled) return;
-        cloudReadyRef.current = false;
-        toast.push("Couldn't reach your cloud copy. Working locally for now.", "warn");
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [user?.uid]);
-
-  function chooseCloudCopy() {
-    backupLocalState(stateRef.current, "before loading cloud copy");
-    commit(syncChoice.remote);
-    cloudReadyRef.current = true;
-    setSyncChoice(null);
-    toast.push("Cloud timetable loaded. Your previous local version was backed up in this browser.", "ok");
-  }
-  function keepLocalCopy() {
-    cloudReadyRef.current = true;
-    setSyncChoice(null);
-    scheduleCloudSave(stateRef.current); // overwrites the cloud copy with this browser's version
-  }
-
   // Viewers can't change the timetable, whatever the UI does.
   const canEditRef = useRef(true);
   canEditRef.current = canEdit;
+  const collabRef = useRef(null);
+  collabRef.current = session;
   const setState = useCallback((updater, opType, opDetail) => {
-    if (!canEditRef.current) { toast.push("You have view-only access to this room.", "info"); return; }
+    if (!canEditRef.current) { toast.push(collabRef.current?.archived ? "This term is archived, so it can't be changed. An admin can reopen it." : "You have view-only access to this term.", "info"); return; }
     const prev = stateRef.current;
     const next = typeof updater === "function" ? updater(prev) : updater;
     if (next === prev) return;
     commit(next);
     collab.pushDiff(prev, next, opType, opDetail);
-    scheduleCloudSave(next);
-  }, [commit, collab.pushDiff, scheduleCloudSave, toast.push]);
+  }, [commit, collab.pushDiff, toast.push]);
 
   const conflicts = useMemo(() => getAllConflicts(state.appointments || {}, state.slots), [state.appointments, state.slots]);
 
@@ -2080,6 +2004,20 @@ export default function TimetableBuilder() {
     lastUid.current = authUid;
     if (prev && authUid && prev !== authUid && collab.session) collab.rejoin();
   }, [authUid]);
+
+  // The list of terms: this browser's recent ones, plus (when signed in) the ones saved to the account.
+  const refreshTerms = useCallback(async () => {
+    const local = loadRecentRooms();
+    let cloud = [];
+    if (user) { try { cloud = await listMyTerms(user.uid); } catch { /* offline: the local list still works */ } }
+    const byCode = new Map();
+    [...cloud, ...local].forEach(t => { const prev = byCode.get(t.code); if (!prev || (t.at || 0) >= (prev.at || 0)) byCode.set(t.code, { ...prev, ...t }); });
+    setTermList([...byCode.values()].sort((a, b) => (b.at || 0) - (a.at || 0)));
+  }, [user?.uid]);
+  useEffect(() => { refreshTerms(); }, [refreshTerms, session?.code, session?.archived, session?.roomName]);
+  useEffect(() => { // remember the open term in the account so any device can list it
+    if (user && session && session.code) saveMyTerm(user.uid, { code: session.code, name: session.roomName || "", role: session.role, archived: !!session.archived, at: Date.now() }).catch(() => {});
+  }, [user?.uid, session?.code, session?.roomName, session?.role, session?.archived]);
 
   function handleApptClick(appt) { setModal({ appt }); }
   function handleCellClick(weekNum, dayIdx, timeId) { if (canEdit) setModal({ weekNum, dayIdx, timeId }); }
@@ -2110,26 +2048,56 @@ export default function TimetableBuilder() {
     catch (e) { const x = explainAuthError(e); if (!x.silent) toast.push(x.message, "warn", 10000); }
   }
   async function handleSignOut() {
-    flushCloudSave();
     await signOutUser();
     if (collab.session) { try { await ensureAuth(); } catch { /* the access-lost dialog explains it */ } } // new anonymous identity; the effect above rejoins
   }
 
-  async function handleCreateRoom(roomName, name) {
+  async function handleCreateRoom(termName, name, { copyFrom } = {}) {
     const displayName = user?.displayName || name;
     setUserName(displayName); writeName(displayName);
-    await collab.createRoom(roomName, displayName);
-    setShowCollab(false);
+    let start = emptyState(termName);
+    if (copyFrom) { // reuse the people and places of an earlier term (needs us to be a member of it)
+      const found = await access.join(copyFrom);
+      const loaded = await loadRoom(found.rid);
+      const earlier = loaded?.tree ? treeToState(loaded.tree) : loaded?.legacy;
+      if (!earlier) throw new Error("The earlier term has no data to copy");
+      start = termFrom(sanitizeState(earlier), termName);
+    }
+    commit(start);
+    await collab.createRoom(termName, displayName);
+    setShowCollab(null); setTab("schedule");
     setShowShare(true);
-    toast.push("Room created. Share the editor code or the read-only link.", "ok");
+    toast.push("Term created. Share the editor code or the read-only link.", "ok");
   }
   async function handleJoinRoom(code, name) {
     const displayName = user?.displayName || name;
     setUserName(displayName); writeName(displayName);
     const sess = await collab.joinRoom(code, displayName);
-    setShowCollab(false);
+    setShowCollab(null); setPendingCode("");
     setTab("schedule");
-    toast.push(`Joined ${sess.roomName || "the room"} as ${ROLE_LABEL[sess.role].toLowerCase()}`, "ok");
+    toast.push(`Opened ${sess.roomName || "the term"} as ${ROLE_LABEL[sess.role].toLowerCase()}`, "ok");
+  }
+  async function handleOpenTerm(term) {
+    const displayName = user?.displayName || userName;
+    if (!displayName) { setPendingCode(term.code); setShowCollab("join"); return; } // need a name first; the join dialog asks for it
+    setOpeningCode(term.code); setTermsError("");
+    try { await handleJoinRoom(term.code, displayName); }
+    catch (e) {
+      setTermsError(e?.message === "Room not found"
+        ? `"${term.name || "That term"}" can't be opened with its saved code. An admin may have changed it. Ask them for the current code, or remove it from this list.`
+        : "Couldn't open the term: " + (e?.message || "network error"));
+    }
+    setOpeningCode("");
+  }
+  function handleForgetTerm(term) {
+    forgetRoom(term.code);
+    if (user) removeMyTerm(user.uid, term.code).catch(() => {});
+    setTermList(l => l.filter(t => t.code !== term.code));
+  }
+  function handleSwitchTerm() {
+    collab.leaveRoom();
+    commit(emptyState()); // the term's data stays in the term; nothing is left behind on this screen
+    setLocalMode(false); setTab("schedule"); setShowShare(false); setModal(null);
   }
 
   // Tell collaborators which view we're on and which session we have open
@@ -2162,12 +2130,26 @@ export default function TimetableBuilder() {
   );
   if (!user && !skipAuth) return <LoginScreen onSkip={() => setSkipAuth(true)} />;
 
+  const collabModal = showCollab && (
+    <CollabModal onCreate={handleCreateRoom} onJoin={handleJoinRoom} onClose={() => { setShowCollab(null); setPendingCode(""); }} defaultName={userName}
+      initialCode={pendingCode || joinLinkCode} initialMode={showCollab} terms={termList} />
+  );
+  if (!session && !localMode) return (
+    <>
+      <TermsScreen terms={termList} openingCode={openingCode} error={termsError} user={user}
+        onOpen={handleOpenTerm} onForget={handleForgetTerm} onNew={() => setShowCollab("create")} onJoin={() => setShowCollab("join")}
+        onSignIn={handleSignIn} onSignOut={handleSignOut} onLocal={() => setLocalMode(true)} />
+      {collabModal}
+      <Toasts list={toast.list} dismiss={toast.dismiss} />
+    </>
+  );
+
   const conflictCount = conflicts.length;
   const openComments = Object.values(collab.comments.open || {}).reduce((a, b) => a + b, 0);
   const counts = { conflicts: conflictCount, comments: openComments };
   const current = VIEWS.find(v => v.id === tab) || VIEWS[0];
   const subtitle = tab === "schedule"
-    ? `${state.settings.semester || "Semester"}${canEdit ? "" : " · view only"}`
+    ? `${state.settings.semester || (session ? "Term" : "This device only")}${session?.archived ? " · archived, read-only" : canEdit ? "" : " · view only"}`
     : current.sub || state.settings.semester || "";
 
   return (
@@ -2175,7 +2157,7 @@ export default function TimetableBuilder() {
     <CollabCtx.Provider value={collabCtx}>
       <div className="app">
         <Rail views={views} view={tab} onView={setTab} counts={counts} theme={theme.resolved} onToggleTheme={theme.toggle}
-          user={user} onSignIn={handleSignIn} onSignOut={handleSignOut} signedInHint="Sign in to keep your timetable in the cloud" />
+          user={user} onSignIn={handleSignIn} onSignOut={handleSignOut} signedInHint="Sign in to see your terms on any device" />
         <div className="main">
           <header className="top">
             <div className="top-title">
@@ -2183,22 +2165,18 @@ export default function TimetableBuilder() {
               {subtitle && <div className="page-sub">{subtitle}</div>}
             </div>
             <div className="top-actions">
-              {user && (cloudError
-                ? <span className="pill bad hide-sm" role="status"><span className="dot" />Not saved, will retry</span>
-                : cloudSaving ? <span className="pill warn hide-sm" role="status"><span className="dot pulse" />Saving…</span>
-                : lastCloudSave ? <span className="pill hide-sm" role="status"><span className="dot" />Saved</span> : null)}
               {conflictCount > 0 && (
                 <button type="button" className="pill bad" onClick={() => setTab("conflicts")}>
                   <span className="dot pulse" />{conflictCount} conflict{conflictCount !== 1 ? "s" : ""}
                 </button>
               )}
-              {!session && <Btn variant="outline" size="md" onClick={() => setShowCollab(true)}><Icon name="people" size={16} /> <span className="hide-sm">Work together</span></Btn>}
+              {!session && <Btn variant="outline" size="md" onClick={() => setLocalMode(false)}><Icon name="people" size={16} /> <span className="hide-sm">Open a term</span></Btn>}
               {canEdit && <Btn variant="primary" size="md" onClick={() => setModal({ weekNum: 1, dayIdx: 0, timeId: state.slots[0]?.id })}><Icon name="plus" size={16} /> Schedule</Btn>}
             </div>
           </header>
           {session && (
             <RoomBar session={session} presence={collab.presence} syncing={collab.syncing} lastSyncAt={collab.lastSyncAt}
-              onShare={() => setShowShare(true)} onLeave={() => { collab.leaveRoom(); toast.push("Left the room. Your copy stays on this device.", "info"); }} />
+              onShare={() => setShowShare(true)} onLeave={handleSwitchTerm} />
           )}
           <main className="view" id="main">
             {tab === "schedule" && <ScheduleTab state={state} onApptClick={handleApptClick} onCellClick={handleCellClick} conflicts={conflicts} />}
@@ -2221,12 +2199,10 @@ export default function TimetableBuilder() {
         <ApptModal appt={modal.appt || null} weekNum={modal.weekNum} dayIdx={modal.dayIdx} timeId={modal.timeId} state={state}
           readOnly={!canEdit} onSave={handleApptSave} onClose={() => setModal(null)} onDelete={id => { handleApptDelete(id); setModal(null); }} />
       )}
-      {showCollab && (
-        <CollabModal onCreate={handleCreateRoom} onJoin={handleJoinRoom} onClose={() => setShowCollab(false)} defaultName={userName} initialCode={joinLinkCode} />
-      )}
+      {collabModal}
       {showShare && session && (
         <ShareModal session={session} onClose={() => setShowShare(false)} toast={toast.push}
-          onUpgrade={collab.upgradeLegacy} onAdminCodeChanged={collab.updateSessionCode} />
+          onUpgrade={collab.upgradeLegacy} onAdminCodeChanged={collab.updateSessionCode} onArchive={collab.setArchived} />
       )}
       {showMore && (
         <MoreSheet views={views} view={tab} onView={setTab} onClose={() => setShowMore(false)} theme={theme.resolved} onToggleTheme={theme.toggle}
@@ -2235,24 +2211,6 @@ export default function TimetableBuilder() {
       {collab.accessLost && (
         <AccessLostModal info={collab.accessLost} onClose={collab.clearAccessLost}
           onJoinAgain={() => { collab.clearAccessLost(); setShowCollab(true); }} />
-      )}
-      {syncChoice && (
-        <Modal title="Which timetable do you want to keep?" subtitle="This browser and your cloud account have different versions"
-          onClose={() => { setSyncChoice(null); toast.push("Cloud sync is paused until you sign in again", "warn"); }} width={480}>
-          <div style={{ padding: 20, fontSize: 14, lineHeight: 1.6 }}>
-            <p style={{ margin: "0 0 10px" }}>
-              Your cloud copy{syncChoice.savedAt ? ` (saved ${new Date(syncChoice.savedAt).toLocaleString()})` : ""} has <b>{Object.keys(syncChoice.remote.appointments || {}).length}</b> sessions.
-              This browser has <b>{Object.keys(state.appointments || {}).length}</b>.
-            </p>
-            <p style={{ margin: "0 0 16px", color: "var(--muted)" }}>
-              Whichever you don't choose is replaced. A backup of this browser's version is kept if you load the cloud copy.
-            </p>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <Btn variant="primary" size="md" onClick={chooseCloudCopy} style={{ flex: 1 }}>Use cloud copy</Btn>
-              <Btn variant="outline" size="md" onClick={keepLocalCopy} style={{ flex: 1 }}>Keep this browser's copy</Btn>
-            </div>
-          </div>
-        </Modal>
       )}
       <Toasts list={toast.list} dismiss={toast.dismiss} />
     </CollabCtx.Provider>

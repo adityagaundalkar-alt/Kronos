@@ -85,5 +85,8 @@ export function createRoomClient({ api, getState, applyRemote, sanitize, callbac
     }
   }
 
-  return { join, leave, pushDiff, get active() { return !!code; }, get readOnly() { return readOnly; } };
+  /** Stop (or resume) writing, e.g. when an admin archives the term while we have it open. */
+  function setReadOnly(v) { readOnly = !!v; }
+
+  return { join, leave, pushDiff, setReadOnly, get active() { return !!code; }, get readOnly() { return readOnly; } };
 }

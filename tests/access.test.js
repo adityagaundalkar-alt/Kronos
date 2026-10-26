@@ -319,3 +319,38 @@ describe("creating a room", () => {
     await expect(anon.createRoom({ name: "x" })).rejects.toThrow("Not signed in");
   });
 });
+
+
+describe("archived terms (read-only for everyone)", () => {
+  beforeEach(async () => { await alice.access.setArchived(room.rid, true); });
+
+  it("blocks edits from admins and editors, but everyone can still read", async () => {
+    await expect(alice.store.set(`rooms/${room.rid}/v2/courses/c2`, { id: "c2" })).rejects.toMatchObject(denied);
+    await expect(bob.store.set(`rooms/${room.rid}/v2/courses/c2`, { id: "c2" })).rejects.toMatchObject(denied);
+    await expect(bob.store.update(`rooms/${room.rid}/v2`, { "courses/c1": null })).rejects.toMatchObject(denied);
+    await expect(bob.store.set(`rooms/${room.rid}/ops/o1`, { type: "x" })).rejects.toMatchObject(denied);
+    expect((await bob.store.get(`rooms/${room.rid}/v2/courses/c1`)).name).toBe("Intro");
+    expect((await cara.store.get(`rooms/${room.rid}/v2/courses/c1`)).name).toBe("Intro");
+    expect((await cara.store.get(`rooms/${room.rid}/meta`)).archived).toBe(true);
+  });
+  it("blocks new comments", async () => {
+    await expect(cara.store.set(`rooms/${room.rid}/comments/k1`, { apptId: "a", uid: "cara", name: "Cara", text: "hi", at: 1 })).rejects.toMatchObject(denied);
+  });
+  it("only an admin can archive or reopen", async () => {
+    await expect(bob.access.setArchived(room.rid, false)).rejects.toMatchObject(denied);
+    await expect(cara.access.setArchived(room.rid, false)).rejects.toMatchObject(denied);
+    await expect(mallory.access.setArchived(room.rid, false)).rejects.toMatchObject(denied);
+    await alice.access.setArchived(room.rid, false);
+    await bob.store.set(`rooms/${room.rid}/v2/courses/c2`, { id: "c2", name: "Back" });
+    expect((await bob.store.get(`rooms/${room.rid}/v2/courses/c2`)).name).toBe("Back");
+  });
+  it("an editor cannot archive a term either", async () => {
+    await alice.access.setArchived(room.rid, false);
+    await expect(bob.access.setArchived(room.rid, true)).rejects.toMatchObject(denied);
+  });
+  it("reopening restores comments and edits for the right roles", async () => {
+    await alice.access.setArchived(room.rid, false);
+    await cara.store.set(`rooms/${room.rid}/comments/k1`, { apptId: "a", uid: "cara", name: "Cara", text: "hi", at: 1 });
+    await expect(cara.store.set(`rooms/${room.rid}/v2/courses/c3`, { id: "c3" })).rejects.toMatchObject(denied);
+  });
+});
