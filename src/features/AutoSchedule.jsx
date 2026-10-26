@@ -6,6 +6,7 @@ import { Btn, Badge, Field, Segmented, EmptyState } from "../ui/kit.jsx";
 import Icon from "../ui/Icon.jsx";
 import { askConfirm } from "../ui/Confirm.jsx";
 import GroupPicker from "../ui/GroupPicker.jsx";
+import SearchSelect from "../ui/SearchSelect.jsx";
 import AvailabilityGrid from "./AvailabilityGrid.jsx";
 
 const MODES = [
@@ -68,11 +69,7 @@ function JobCard({ job, ji, state, onUpdate, onRemove, onToggle, onInstructorAva
         <div style={{ padding: 16 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "0 14px" }}>
             <Field label="Course" required>
-              <select value={job.custom ? "__other" : job.courseId} onChange={e => pickCourse(e.target.value)}>
-                <option value="">Choose a course…</option>
-                {courses.map(c => <option key={c.id} value={c.id}>{c.code}  {c.name}</option>)}
-                <option value="__other">Other event (extra class, workshop, exam…)</option>
-              </select>
+              <SearchSelect value={job.custom ? "__other" : job.courseId} onChange={pickCourse} placeholder="Choose a course…" options={[...courses.map(c => ({ value: c.id, label: `${c.code}  ${c.name}` })), { value: "__other", label: "Other event (extra class, workshop, exam…)" }]} />
             </Field>
             {job.custom && (
               <Field label="Event title" required hint="Shown on the timetable">
@@ -80,10 +77,7 @@ function JobCard({ job, ji, state, onUpdate, onRemove, onToggle, onInstructorAva
               </Field>
             )}
             <Field label="Instructor">
-              <select value={job.instructorId} onChange={e => onUpdate({ instructorId: e.target.value })}>
-                <option value="">None</option>
-                {instructors.map(i => <option key={i.id} value={i.id}>{i.name}</option>)}
-              </select>
+              <SearchSelect value={job.instructorId || ""} onChange={v => onUpdate({ instructorId: v })} noneLabel="None" options={instructors.map(i => ({ value: i.id, label: i.name }))} />
             </Field>
           </div>
           <Field label="Student groups" hint="The scheduler avoids clashes for these groups, and picks a room big enough for them.">
@@ -133,10 +127,7 @@ function JobCard({ job, ji, state, onUpdate, onRemove, onToggle, onInstructorAva
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "0 14px" }}>
             <Field label="Fixed room (optional)" hint="Leave on automatic to pick the smallest room that fits.">
-              <select value={job.roomId} onChange={e => onUpdate({ roomId: e.target.value })}>
-                <option value="">Choose automatically</option>
-                {rooms.map(r => <option key={r.id} value={r.id}>{r.name} ({r.capacity} seats)</option>)}
-              </select>
+              <SearchSelect value={job.roomId || ""} onChange={v => onUpdate({ roomId: v })} noneLabel="Choose automatically" options={rooms.map(r => ({ value: r.id, label: r.name, hint: `${r.capacity} seats` }))} />
             </Field>
             <Field label="Preferred room type">
               <select value={job.preferRoomType} onChange={e => onUpdate({ preferRoomType: e.target.value })}>
