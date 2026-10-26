@@ -1,11 +1,14 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, createContext, useContext } from "react";
 import {
-  auth, db,
-  signInWithGoogle, signOutUser, onAuthChange,
+  auth,
+  signInWithGoogle, signOutUser, onAuthChange, ensureAuth,
   loadUserState, saveUserState,
-  colLoad, colSave, colGetPresence, colSetPresence,
-  colPushOp, colGetOps, listRooms, registerRoom, subscribeToRoom,
+  registerRoom, roomExists, loadRoom, writeRoomTree, updateRoom, subscribeRoom,
+  pushOp, subscribeOps, subscribePresence, joinPresence,
 } from "./firebase.js";
+import { iso, parseISO, addDays, mondayOf, fmt, fmtLong, getWeekStart, slotDate } from "./dates.js";
+import { same } from "./sync.js";
+import { createRoomClient } from "./roomClient.js";
 
 // ═══════════════════════════════════════════════════════════════════
 //  CONSTANTS
@@ -51,16 +54,7 @@ const TABS = [
 //  UTILS
 // ═══════════════════════════════════════════════════════════════════
 const uid      = () => Math.random().toString(36).slice(2,9);
-const addDays  = (d,n) => { const r=new Date(d); r.setDate(r.getDate()+n); return r; };
-const iso      = d => d.toISOString().slice(0,10);
-const fmt      = d => d.toLocaleDateString("en-GB",{day:"2-digit",month:"short"});
-const fmtLong  = d => d.toLocaleDateString("en-GB",{weekday:"short",day:"2-digit",month:"short",year:"numeric"});
-
-function getWeekStart(w1,wn) {
-  const b=new Date(w1), off=wn===0?-7:(wn-1)*7;
-  return addDays(b,off);
-}
-function slotDate(w1,wn,di) { return addDays(getWeekStart(w1,wn),di); }
+// Date helpers (iso, addDays, fmt, getWeekStart, slotDate, ...) live in ./dates.js
 function getPalette(courseId,courses) {
   const c=courses?.find(x=>x.id===courseId);
   return PALETTE.find(p=>p.id===c?.colorId)||PALETTE[0];
@@ -81,21 +75,39 @@ const saveLocal = s  => { try{ localStorage.setItem(LOCAL_KEY,JSON.stringify(s))
 const USER_COLORS = ["#059669","#0284c7","#be185d","#7c3aed","#b45309","#c2410c","#0e7490","#e11d48"];
 const userColor   = (idx) => USER_COLORS[idx % USER_COLORS.length];
 
-// Collab backend functions are imported from ./firebase.js
-// genRoomCode stays here (no Firebase needed)
-function genRoomCode() {
-  const chars="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  return Array.from({length:6},()=>chars[Math.floor(Math.random()*chars.length)]).join("");
+// Collab backend functions are imported from ./firebase.js.
+// Room codes are the only thing protecting a room, so they come from the
+// crypto RNG and are 8 characters (32^8 ≈ 1.1e12). Older 6-character codes still work.
+const CODE_CHARS="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+function genRoomCode(len=8) {
+  const buf=new Uint32Array(len);
+  crypto.getRandomValues(buf);
+  return Array.from(buf,n=>CODE_CHARS[n%CODE_CHARS.length]).join("");
 }
+const isValidRoomCode = c => /^[A-Z0-9]{6,8}$/.test(c);
+
+// Rooms this browser has joined before (stored locally, never listed from the server)
+const RECENT_ROOMS_KEY="kronos_recent_rooms";
+function loadRecentRooms() {
+  try { const r=JSON.parse(localStorage.getItem(RECENT_ROOMS_KEY)||"[]"); return Array.isArray(r)?r:[]; } catch { return []; }
+}
+function rememberRoom(code,name) {
+  try {
+    const all=loadRecentRooms(), prev=all.find(r=>r.code===code);
+    const rest=all.filter(r=>r.code!==code);
+    localStorage.setItem(RECENT_ROOMS_KEY,JSON.stringify([{code,name:name||prev?.name||"",at:Date.now()},...rest].slice(0,5)));
+  } catch {}
+}
+
+// Who else is in the room and which session each person has open
+const PresenceCtx=createContext({editing:{}});
 
 
 // ═══════════════════════════════════════════════════════════════════
 //  SEED DATA
 // ═══════════════════════════════════════════════════════════════════
 function seed() {
-  const today=new Date(), mon=new Date(today);
-  mon.setDate(today.getDate()-today.getDay()+1);
-  const w1=iso(mon);
+  const w1=iso(mondayOf(new Date()));
   const iA=uid(),iB=uid(),iC=uid(),iD=uid();
   const r1=uid(),r2=uid(),r3=uid(),r4=uid();
   const g1=uid(),g2=uid(),g3=uid(),g4=uid(),g5=uid();
@@ -480,6 +492,14 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
   const [scheduleAll,setScheduleAll]=useState(false);
   const [overrides,setOverrides]=useState({instructor:false,room:false,group:false});
 
+  // Collaboration awareness: who else has this session open, and did it change underneath us?
+  const {editing}=useContext(PresenceCtx);
+  const otherEditors=isEdit?(editing[appt.id]||[]):[];
+  const openedAs=useRef(isEdit?JSON.stringify(appt):null);
+  const liveAppt=isEdit?appointments[appt.id]:null;
+  const deletedRemotely=isEdit&&!liveAppt;
+  const changedRemotely=isEdit&&!!liveAppt&&JSON.stringify(liveAppt)!==openedAs.current;
+
   // auto-fill from course
   useEffect(()=>{
     if(!form.courseId) return;
@@ -495,7 +515,8 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
   const blockingConflicts=conflicts.filter(c=>!overrides[c.type]);
 
   function handleSave() {
-    if(!form.courseId||!form.weekNum===undefined) return;
+    if(!form.courseId||form.weekNum===undefined) return;
+    if(deletedRemotely) return; // someone else deleted it - saving would silently resurrect it
     if(blockingConflicts.length) return;
     const course=courses.find(x=>x.id===form.courseId);
     const base={...form,courseName:course?.name,courseCode:course?.code,section:form.section||""};
@@ -516,9 +537,27 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
 
   return (
     <Modal title={isEdit?"Edit Session":"New Session"}
-      subtitle={isEdit?`${appt.courseCode} · ${DAYS_FULL[appt.dayIdx]} ${appt.timeId==="am"?"Morning":"Afternoon"}`:"Schedule a new class session"}
+      subtitle={isEdit?`${appt.courseCode} · ${DAYS_FULL[appt.dayIdx]} ${slots.find(s=>s.id===appt.timeId)?.short||appt.timeId}`:"Schedule a new class session"}
       onClose={onClose} width={520}>
       <div style={{padding:20,display:"flex",flexDirection:"column",gap:0}}>
+        {deletedRemotely&&(
+          <div style={{marginBottom:12,padding:"8px 10px",borderRadius:"var(--r)",fontSize:11,
+            background:"rgba(248,113,113,0.12)",border:"1px solid rgba(248,113,113,0.3)",color:"var(--danger)"}}>
+            This session was deleted by a collaborator. Close this window — saving is disabled so it isn't restored by accident.
+          </div>
+        )}
+        {!deletedRemotely&&changedRemotely&&(
+          <div style={{marginBottom:12,padding:"8px 10px",borderRadius:"var(--r)",fontSize:11,
+            background:"rgba(251,191,36,0.12)",border:"1px solid rgba(251,191,36,0.35)",color:"var(--warn)"}}>
+            A collaborator changed this session while you had it open. Saving will overwrite their change.
+          </div>
+        )}
+        {otherEditors.length>0&&(
+          <div style={{marginBottom:12,padding:"8px 10px",borderRadius:"var(--r)",fontSize:11,
+            background:"rgba(59,130,246,0.1)",border:"1px solid rgba(59,130,246,0.3)",color:"var(--text)"}}>
+            {otherEditors.map(e=>e.name).join(", ")} {otherEditors.length>1?"are":"is"} also editing this session.
+          </div>
+        )}
         {/* Course */}
         <Field label="Course" required>
           <select value={form.courseId} onChange={e=>setForm(f=>({...f,courseId:e.target.value,instructorId:"",groupIds:[]}))}>
@@ -649,11 +688,24 @@ function ApptChip({appt,courses,instructors,rooms,onClick,conflicts=[]}) {
   const hasConflict=(conflicts||[]).some(c=>c&&c.a&&c.b&&(c.a.id===appt.id||c.b.id===appt.id));
   const instr=instructors.find(x=>x.id===appt.instructorId);
   const room=rooms.find(x=>x.id===appt.roomId);
+  const editors=useContext(PresenceCtx).editing[appt.id]||[];
   return (
     <div onClick={()=>onClick(appt)}
-      style={{background:pal.bg,border:`1px solid ${hasConflict?"var(--danger)":pal.border}`,
+      title={editors.length?`Being edited by ${editors.map(e=>e.name).join(", ")}`:undefined}
+      style={{background:pal.bg,border:`1px solid ${hasConflict?"var(--danger)":editors.length?editors[0].color:pal.border}`,
+        boxShadow:editors.length?`0 0 0 1px ${editors[0].color}`:undefined,
         borderRadius:"var(--r)",padding:"5px 7px",cursor:"pointer",marginBottom:3,
         transition:"all 0.12s",position:"relative",overflow:"hidden"}}>
+      {editors.length>0&&(
+        <div style={{position:"absolute",bottom:2,right:3,display:"flex",gap:2}}>
+          {editors.slice(0,3).map((e,i)=>(
+            <span key={i} title={e.name} style={{width:12,height:12,borderRadius:"50%",background:e.color,
+              color:"#fff",fontSize:7,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"}}>
+              {initials(e.name)}
+            </span>
+          ))}
+        </div>
+      )}
       {hasConflict&&(
         <div style={{position:"absolute",top:0,right:0,width:0,height:0,
           borderStyle:"solid",borderWidth:"0 16px 16px 0",
@@ -3091,90 +3143,90 @@ function JobCard({ job, ji, courses, instructors, groups, rooms, slots, state, o
 
 // ═══════════════════════════════════════════════════════════════════
 //  COLLABORATION HOOK
+//  Per-item sync: every local change is diffed against the previous state and
+//  only the changed items are written (see sync.js). Remote changes arrive
+//  through live Firebase listeners - no polling, no whole-timetable overwrite,
+//  and deletions propagate.
 // ═══════════════════════════════════════════════════════════════════
-function useCollaboration(localState, setLocalState, toast) {
+const PRESENCE_STALE_MS = 60000;
+const BACKUP_PREFIX = "kronos_backup_";
+
+// Keep a safety copy of local data before it is replaced (joining a room, adopting the cloud copy).
+function backupLocalState(state, reason) {
+  try {
+    localStorage.setItem(BACKUP_PREFIX + Date.now(), JSON.stringify({ reason, state }));
+    Object.keys(localStorage).filter(k => k.startsWith(BACKUP_PREFIX)).sort().slice(0, -3)
+      .forEach(k => localStorage.removeItem(k)); // keep the 3 most recent
+  } catch {}
+}
+
+function useCollaboration({ getState, applyRemote, toast }) {
   const [session, setSession] = useState(null);
-  const [presence, setPresence] = useState({});
+  const [rawPresence, setRawPresence] = useState({});
+  const [tick, setTick] = useState(0);
   const [syncing, setSyncing] = useState(false);
   const [lastSyncAt, setLastSyncAt] = useState(null);
-  const pollRef = useRef(null);
-  const presencePollRef = useRef(null);
-  const lastHashRef = useRef(null);
   const sessionRef = useRef(null);
+  const cleanupRef = useRef([]);
+  const presenceCtl = useRef(null);
+  const lastToastAt = useRef(0);
+  const clientRef = useRef(null);
 
-  function hashState(s) {
-    const str = JSON.stringify({a:Object.keys(s.appointments||{}).sort().join(","),c:(s.courses||[]).map(x=>x.id).join(",")});
-    let h=0; for(let i=0;i<str.length;i++) h=((h<<5)-h)+str.charCodeAt(i); return h;
+  if (!clientRef.current) {
+    clientRef.current = createRoomClient({
+      api: { ensureAuth, loadRoom, writeRoomTree, updateRoom, subscribeRoom, pushOp },
+      getState, applyRemote, sanitize: sanitizeState,
+      callbacks: {
+        onRemoteChange: () => {
+          const t = Date.now();
+          if (t - lastToastAt.current > 8000) { lastToastAt.current = t; toast("Schedule updated by a collaborator", "info"); }
+        },
+        onSyncing: setSyncing,
+        onSynced: () => setLastSyncAt(Date.now()),
+        onError: msg => toast(msg, "warn"),
+        backup: backupLocalState,
+      },
+    });
   }
+  const client = clientRef.current;
 
   async function joinRoom(code, userName, isOwner) {
-    const colorIdx = Math.floor(Math.random()*USER_COLORS.length);
-    const sess = { roomCode:code, userId:uid(), userName, userColor:userColor(colorIdx), isOwner };
-    setSession(sess); sessionRef.current=sess;
-    if (!isOwner) {
-      setSyncing(true);
-      const remote = await colLoad(code);
-      if (remote) { const clean=sanitizeState(remote); setLocalState(clean); saveLocal(clean); lastHashRef.current=hashState(clean); }
-      setSyncing(false);
-    } else {
-      const safeLocalState=sanitizeState(localState)||localState; await colSave(code, safeLocalState); lastHashRef.current=hashState(safeLocalState);
-    }
-    await _updatePresence(sess, "schedule");
-    _startPolling(sess);
+    const sess = { roomCode: code, userId: uid(), userName, userColor: userColor(Math.floor(Math.random() * USER_COLORS.length)), isOwner };
+    await client.join(code, { userId: sess.userId, userName }, isOwner); // throws if the room can't be opened
+    sessionRef.current = sess; setSession(sess);
+    cleanupRef.current.push(subscribePresence(code, setRawPresence));
+    presenceCtl.current = joinPresence(code, sess.userId, { name: userName, color: sess.userColor, tab: "schedule", editing: null });
+    const t = setInterval(() => setTick(x => x + 1), 15000); // re-evaluate who is stale
+    cleanupRef.current.push(() => clearInterval(t));
+    rememberRoom(code);
     return sess;
   }
 
   async function leaveRoom() {
-    const sess=sessionRef.current; if(!sess) return;
-    clearInterval(pollRef.current); clearInterval(presencePollRef.current);
-    try { const p=await colGetPresence(sess.roomCode); delete p[sess.userId]; await colSetPresence(sess.roomCode,p); } catch {}
-    setSession(null); sessionRef.current=null; setPresence({});
+    client.leave();
+    cleanupRef.current.forEach(fn => { try { fn(); } catch {} });
+    cleanupRef.current = [];
+    try { await presenceCtl.current?.leave(); } catch {}
+    presenceCtl.current = null; sessionRef.current = null;
+    setSession(null); setRawPresence({});
   }
 
-  async function _updatePresence(sess, tab) {
-    if(!sess?.roomCode) return;
-    try { const p=await colGetPresence(sess.roomCode); p[sess.userId]={name:sess.userName,color:sess.userColor,tab,at:Date.now()}; await colSetPresence(sess.roomCode,p); } catch {}
-  }
+  const pushDiff = (prev, next, opType, opDetail) => client.pushDiff(prev, next, opType, opDetail);
+  const setPresenceFields = fields => presenceCtl.current?.update(fields);
 
-  async function pushState(newState, opType, opDetail) {
-    const sess=sessionRef.current; if(!sess) return;
-    setSyncing(true);
-    try {
-      await colSave(sess.roomCode, newState); lastHashRef.current=hashState(newState);
-      await colPushOp(sess.roomCode, {id:uid(),userId:sess.userId,userName:sess.userName,at:Date.now(),type:opType||"update",detail:opDetail||""});
-    } catch {}
-    setSyncing(false); setLastSyncAt(Date.now());
-  }
+  const presence = useMemo(() => {
+    const now = Date.now(), out = {};
+    Object.entries(rawPresence || {}).forEach(([id, p]) => { if (p && now - (p.at || 0) < PRESENCE_STALE_MS) out[id] = p; });
+    return out;
+  }, [rawPresence, tick]);
 
-  function _startPolling(sess) {
-    clearInterval(pollRef.current); clearInterval(presencePollRef.current);
-    pollRef.current = setInterval(async () => {
-      const s=sessionRef.current; if(!s) return;
-      try {
-        const remote=await colLoad(s.roomCode); if(!remote) return;
-        const rh=hashState(remote);
-        if(rh!==lastHashRef.current) {
-          lastHashRef.current=rh;
-          setLocalState(prev=>{ const raw={...remote,appointments:{...(prev.appointments||{}),...(remote.appointments||{})}}; const merged=sanitizeState(raw); saveLocal(merged); return merged; });
-          setLastSyncAt(Date.now());
-          toast("Schedule updated by collaborator","info");
-        }
-      } catch {}
-    }, 2500);
-    presencePollRef.current = setInterval(async () => {
-      const s=sessionRef.current; if(!s) return;
-      try {
-        const p=await colGetPresence(s.roomCode);
-        const now=Date.now();
-        Object.keys(p).forEach(k=>{ if(now-p[k].at>20000) delete p[k]; });
-        setPresence({...p});
-        await _updatePresence(s,"active");
-      } catch {}
-    }, 4000);
-  }
+  useEffect(() => () => { // leave cleanly if the component unmounts
+    client.leave();
+    cleanupRef.current.forEach(fn => { try { fn(); } catch {} });
+    presenceCtl.current?.leave();
+  }, []);
 
-  useEffect(()=>()=>{ clearInterval(pollRef.current); clearInterval(presencePollRef.current); },[]);
-  return { session, presence, syncing, lastSyncAt, joinRoom, leaveRoom, pushState };
+  return { session, presence, syncing, lastSyncAt, joinRoom, leaveRoom, pushDiff, setPresenceFields };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -3187,26 +3239,39 @@ function CollabModal({ onJoin, onClose, defaultName }) {
   const [userName, setUserName] = useState(auth.currentUser?.displayName||defaultName||"");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [knownRooms, setKnownRooms] = useState([]);
-  useEffect(()=>{ listRooms().then(r=>setKnownRooms(r.slice(-5).reverse())); },[]);
+  const [knownRooms] = useState(loadRecentRooms); // only rooms this browser has used - never listed from the server
 
   async function handleCreate() {
     if(!userName.trim()){setError("Enter your name");return;}
     if(!roomName.trim()){setError("Enter a room name");return;}
     setLoading(true); setError("");
-    const code=genRoomCode();
-    await registerRoom(code,roomName.trim(),auth.currentUser?.uid||"anonymous");
-    await onJoin(code,userName.trim(),true);
+    try {
+      await ensureAuth();
+      let code=genRoomCode();
+      for(let i=0;i<5&&await roomExists(code);i++) code=genRoomCode(); // avoid colliding with an existing room
+      await registerRoom(code,roomName.trim(),auth.currentUser?.uid||"anonymous");
+      rememberRoom(code,roomName.trim());
+      await onJoin(code,userName.trim(),true);
+    } catch(e) {
+      setError(e?.code==="PERMISSION_DENIED"||/permission/i.test(e?.message||"")
+        ? "Couldn't create the room — the database rejected the request. Check the Firebase rules."
+        : "Couldn't create the room: "+(e?.message||"network error"));
+    }
     setLoading(false);
   }
   async function handleJoin() {
     if(!userName.trim()){setError("Enter your name");return;}
     const code=joinCode.trim().toUpperCase().replace(/[^A-Z0-9]/g,"");
-    if(code.length!==6){setError("Room code must be 6 characters");return;}
+    if(!isValidRoomCode(code)){setError("Room codes are 6–8 letters and numbers");return;}
     setLoading(true); setError("");
-    const remote=await colLoad(code);
-    if(!remote){setError("Room not found — check the code and try again");setLoading(false);return;}
-    await onJoin(code,userName.trim(),false);
+    try {
+      await ensureAuth();
+      if(!await roomExists(code)){setError("Room not found — check the code and try again");setLoading(false);return;}
+      await onJoin(code,userName.trim(),false);
+    } catch(e) {
+      setError(e?.message==="Room not found"?"Room not found — check the code and try again"
+        :"Couldn't join the room: "+(e?.message||"network error"));
+    }
     setLoading(false);
   }
 
@@ -3229,7 +3294,7 @@ function CollabModal({ onJoin, onClose, defaultName }) {
               style={{background:"rgba(59,130,246,0.08)",border:"1px solid rgba(59,130,246,0.25)",
                 borderRadius:"var(--r2)",padding:"14px 16px",cursor:"pointer",textAlign:"left",color:"var(--text)",fontFamily:"inherit"}}>
               <div style={{fontSize:13,fontWeight:600,color:"#60a5fa",marginBottom:3}}>→ Join a Room</div>
-              <div style={{fontSize:11,color:"var(--muted)"}}>Enter a 6-character room code to join a session</div>
+              <div style={{fontSize:11,color:"var(--muted)"}}>Enter your room code to join a session</div>
             </button>
             {knownRooms.length>0&&(
               <div style={{marginTop:4}}>
@@ -3239,8 +3304,8 @@ function CollabModal({ onJoin, onClose, defaultName }) {
                     style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",borderRadius:"var(--r)",
                       border:"1px solid var(--border)",marginBottom:5,cursor:"pointer",background:"var(--bg3)"}}>
                     <span style={{fontSize:11,fontFamily:"var(--mono)",fontWeight:700,color:"var(--accent)",letterSpacing:"0.1em"}}>{r.code}</span>
-                    <span style={{fontSize:11,color:"var(--text)",flex:1}}>{r.name}</span>
-                    <span style={{fontSize:9,color:"var(--muted2)"}}>{new Date(r.createdAt).toLocaleDateString()}</span>
+                    <span style={{fontSize:11,color:"var(--text)",flex:1}}>{r.name||"Room"}</span>
+                    <span style={{fontSize:9,color:"var(--muted2)"}}>{new Date(r.at).toLocaleDateString()}</span>
                   </div>
                 ))}
               </div>
@@ -3268,7 +3333,7 @@ function CollabModal({ onJoin, onClose, defaultName }) {
           <div style={{marginTop:4}}>
             <Field label="Room Code" required>
               <input value={joinCode} onChange={e=>setJoinCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,""))}
-                placeholder="XXXXXX" maxLength={6}
+                placeholder="XXXXXXXX" maxLength={8}
                 style={{fontFamily:"var(--mono)",fontSize:18,letterSpacing:"0.3em",textAlign:"center"}}
                 onKeyDown={e=>e.key==="Enter"&&handleJoin()}/>
             </Field>
@@ -3376,11 +3441,17 @@ function PresenceBar({ session, presence, syncing, lastSyncAt, onLeave, onCopyCo
 // ═══════════════════════════════════════════════════════════════════
 function ActivityFeed({ roomCode, presence, selfId }) {
   const [ops, setOps] = useState([]);
+  const [, setNow] = useState(0);
   useEffect(()=>{
     if(!roomCode) return;
-    colGetOps(roomCode).then(setOps);
-    const t=setInterval(()=>colGetOps(roomCode).then(setOps),3000);
-    return ()=>clearInterval(t);
+    setOps([]);
+    const seen=new Set();
+    const off=subscribeOps(roomCode,op=>{
+      if(seen.has(op.key)) return; seen.add(op.key);
+      setOps(prev=>[...prev,op].slice(-50));
+    });
+    const t=setInterval(()=>setNow(x=>x+1),10000); // refresh "x s ago" labels
+    return ()=>{ off&&off(); clearInterval(t); };
   },[roomCode]);
 
   const recent=[...ops].reverse().slice(0,30);
@@ -3457,7 +3528,9 @@ function useAuth() {
 
   useEffect(() => {
     const unsub = onAuthChange(u => {
-      setUser(u);
+      // Anonymous identities exist only so room-code joiners pass database rules.
+      // They are not "signed in" as far as the UI and cloud save are concerned.
+      setUser(u && !u.isAnonymous ? u : null);
       setLoading(false);
     });
     return unsub;
@@ -3550,61 +3623,119 @@ export default function TimetableBuilder() {
   const [showCollab,setShowCollab]      = useState(false);
   const [userName, setUserName]         = useState(()=>localStorage.getItem("kronos_user")||"");
   const [cloudSaving, setCloudSaving]   = useState(false);
+  const [cloudError, setCloudError]     = useState(false);
   const [lastCloudSave, setLastCloudSave] = useState(null);
+  const [syncChoice, setSyncChoice]     = useState(null); // {remote, savedAt} when local and cloud copies differ
+  const stateRef                        = useRef(state);   // always the latest state, readable outside render
+  const cloudReadyRef                   = useRef(false);   // false until we know whether to trust local or cloud
   const saveTimerRef                    = useRef(null);
+  const pendingCloudRef                 = useRef(null);    // latest unsaved state for the signed-in user
+  const userRef                         = useRef(null);
   const toast                           = useToasts();
+  userRef.current = user;
 
-  // ── Load user's cloud state when they sign in ─────────────────────
+  // All state changes go through here. Side effects (local save, room sync,
+  // cloud save) happen OUTSIDE React's state updater so they run exactly once.
+  const commit = useCallback(next=>{ stateRef.current=next; setStateRaw(next); saveLocal(next); },[]);
+
+  // Changes arriving from collaborators: applied without being pushed back.
+  // Returns true if anything actually changed (echoes of our own writes change nothing).
+  const applyRemote = useCallback(fn=>{
+    const prev=stateRef.current, raw=fn(prev);
+    if(raw===prev) return false;
+    commit(sanitizeState(raw));
+    return true;
+  },[commit]);
+
+  const collab=useCollaboration({getState:()=>stateRef.current, applyRemote, toast:toast.push});
+
+  // ── Cloud save (signed-in solo use): debounced, flushed on exit, errors shown ──
+  const flushCloudSave=useCallback(async()=>{
+    clearTimeout(saveTimerRef.current);
+    const job=pendingCloudRef.current, u=userRef.current;
+    if(!job||!u||!cloudReadyRef.current) return;
+    pendingCloudRef.current=null;
+    try {
+      await saveUserState(u.uid, job);
+      setCloudError(false); setLastCloudSave(Date.now());
+    } catch(e) {
+      pendingCloudRef.current=job; // keep it so the next change retries
+      setCloudError(true);
+      toast.push("Couldn't save to the cloud — your changes are kept on this device","warn");
+    }
+    setCloudSaving(pendingCloudRef.current!==null);
+  },[]);
+  const scheduleCloudSave=useCallback(next=>{
+    if(!userRef.current||!cloudReadyRef.current) return;
+    pendingCloudRef.current=next;
+    setCloudSaving(true);
+    clearTimeout(saveTimerRef.current);
+    saveTimerRef.current=setTimeout(flushCloudSave,2000);
+  },[flushCloudSave]);
+
+  // Warn before closing the tab while a cloud save is still pending; try to flush when hidden.
   useEffect(()=>{
+    const onUnload=e=>{ if(pendingCloudRef.current){ flushCloudSave(); e.preventDefault(); e.returnValue=""; } };
+    const onHide=()=>{ if(document.visibilityState==="hidden") flushCloudSave(); };
+    window.addEventListener("beforeunload",onUnload);
+    document.addEventListener("visibilitychange",onHide);
+    return ()=>{ window.removeEventListener("beforeunload",onUnload); document.removeEventListener("visibilitychange",onHide); };
+  },[flushCloudSave]);
+
+  // ── On sign-in: never silently replace local work with the cloud copy (or vice-versa) ──
+  useEffect(()=>{
+    cloudReadyRef.current=false; pendingCloudRef.current=null; clearTimeout(saveTimerRef.current);
+    setCloudSaving(false); setCloudError(false); setSyncChoice(null);
     if(!user) return;
     setUserName(user.displayName||user.email||"");
     localStorage.setItem("kronos_user", user.displayName||user.email||"");
+    let cancelled=false;
     (async()=>{
-      const remote = await loadUserState(user.uid);
-      if(remote) {
+      try {
+        const remote = await loadUserState(user.uid);
+        if(cancelled) return;
+        const local = stateRef.current;
+        if(!remote) { cloudReadyRef.current=true; scheduleCloudSave(local); return; } // first sign-in: upload what's here
         const { _savedAt, ...appState } = remote;
         const clean = sanitizeState(appState);
-        setStateRaw(clean);
-        saveLocal(clean);
-        toast.push("Timetable loaded from cloud ✓","ok");
+        const differs = !same({...clean,changelog:[]},{...local,changelog:[]});
+        if(!differs) { cloudReadyRef.current=true; return; }
+        setSyncChoice({remote:clean,savedAt:_savedAt||null}); // wait for the person to choose
+      } catch(e) {
+        if(cancelled) return;
+        cloudReadyRef.current=false;
+        toast.push("Couldn't reach your cloud copy — working locally for now","warn");
       }
     })();
+    return ()=>{ cancelled=true; };
   },[user?.uid]);
 
-  // ── Wrap setState to also push to collab room ─────────────────────
-  const collab=useCollaboration(state,
-    (newState)=>setStateRaw(typeof newState==="function"?(prev=>sanitizeState(newState(prev))||newState(prev)):sanitizeState(newState)||newState),
-    toast.push
-  );
+  function chooseCloudCopy() {
+    backupLocalState(stateRef.current,"before loading cloud copy");
+    commit(syncChoice.remote);
+    cloudReadyRef.current=true;
+    setSyncChoice(null);
+    toast.push("Cloud timetable loaded — your previous local version was backed up in this browser","ok");
+  }
+  function keepLocalCopy() {
+    cloudReadyRef.current=true;
+    setSyncChoice(null);
+    scheduleCloudSave(stateRef.current); // overwrites the cloud copy with this browser's version
+  }
 
   const setState=useCallback((updater,opType,opDetail)=>{
-    setStateRaw(prev=>{
-      const next=typeof updater==="function"?updater(prev):updater;
-      saveLocal(next);
-      if(collab.session) collab.pushState(next,opType,opDetail);
-      // Debounced cloud save (2s after last change)
-      if(user) {
-        clearTimeout(saveTimerRef.current);
-        setCloudSaving(true);
-        saveTimerRef.current = setTimeout(async()=>{
-          await saveUserState(user.uid, next);
-          setCloudSaving(false);
-          setLastCloudSave(Date.now());
-        }, 2000);
-      }
-      return next;
-    });
-  },[collab.session,collab.pushState,user]);
+    const prev=stateRef.current;
+    const next=typeof updater==="function"?updater(prev):updater;
+    if(next===prev) return;
+    commit(next);
+    collab.pushDiff(prev,next,opType,opDetail);
+    scheduleCloudSave(next);
+  },[commit,collab.pushDiff,scheduleCloudSave]);
 
   const conflicts=useMemo(()=>getAllConflicts(state.appointments||{}),[state.appointments]);
 
   function log(action,detail="") {
-    setStateRaw(prev=>{
-      const next={...prev,changelog:[...prev.changelog.slice(-199),{at:Date.now(),action,detail}]};
-      saveLocal(next);
-      if(collab.session) collab.pushState(next,action,detail);
-      return next;
-    });
+    setState(prev=>({...prev,changelog:[...prev.changelog.slice(-199),{at:Date.now(),action,detail}]}),action,detail);
   }
 
   function handleApptClick(appt) { setModal({appt}); }
@@ -3624,20 +3755,43 @@ export default function TimetableBuilder() {
   }
 
   function handleApptDelete(id) {
-    const appt=state.appointments[id];
+    const appt=stateRef.current.appointments[id];
     setState(s=>{const a={...s.appointments};delete a[id];return{...s,appointments:a,
       changelog:[...s.changelog.slice(-199),{at:Date.now(),action:"Session deleted",detail:appt?.courseName}]};
     },"deleted session",appt?.courseName);
     toast.push("Session deleted","warn");
   }
 
+  async function handleSignOut() {
+    flushCloudSave();
+    const sess=collab.session;
+    if(sess) await collab.leaveRoom();           // room access depends on the signed-in identity...
+    await signOutUser();
+    if(sess) {                                    // ...so rejoin under an anonymous one
+      try { await ensureAuth(); await collab.joinRoom(sess.roomCode,sess.userName,false); }
+      catch { toast.push("Signed out — you left the room. Rejoin with the code.","warn"); }
+    }
+  }
+
   async function handleJoinRoom(code,name,isOwner) {
     const displayName = user?.displayName || name;
     if(displayName) { setUserName(displayName); localStorage.setItem("kronos_user",displayName); }
-    await collab.joinRoom(code,displayName||name,isOwner);
+    await collab.joinRoom(code,displayName||name,isOwner); // throws on failure; CollabModal shows the error
     setShowCollab(false);
     toast.push(isOwner?`Room ${code} created — share this code!`:`Joined room ${code}`,"ok");
   }
+
+  // Tell collaborators which tab we're on and which session we have open
+  useEffect(()=>{ collab.setPresenceFields({tab}); },[tab,collab.session?.roomCode]);
+  useEffect(()=>{ collab.setPresenceFields({editing:modal?.appt?.id||null}); },[modal?.appt?.id,collab.session?.roomCode]);
+  const presenceCtx=useMemo(()=>{
+    const editing={};
+    Object.entries(collab.presence).forEach(([id,p])=>{
+      if(id===collab.session?.userId||!p.editing) return;
+      (editing[p.editing]||=[]).push({name:p.name||"Someone",color:p.color||"#888"});
+    });
+    return {editing};
+  },[collab.presence,collab.session?.userId]);
 
   useEffect(()=>{
     const el=document.createElement("style");
@@ -3666,6 +3820,7 @@ export default function TimetableBuilder() {
     : TABS;
 
   return (
+    <PresenceCtx.Provider value={presenceCtx}>
     <div style={{display:"flex",flexDirection:"column",height:"100vh",background:"var(--bg)",fontFamily:"'Outfit',sans-serif",overflow:"hidden",position:"fixed",inset:0}}>
 
       {/* Top bar */}
@@ -3682,7 +3837,9 @@ export default function TimetableBuilder() {
         {/* Cloud save indicator */}
         {user&&(
           <div style={{fontSize:11,color:"var(--muted)",display:"flex",alignItems:"center",gap:4}}>
-            {cloudSaving
+            {cloudError
+              ? <><span style={{width:6,height:6,borderRadius:"50%",background:"var(--danger)",display:"inline-block"}}/>Not saved — retrying on next change</>
+              : cloudSaving
               ? <><span style={{width:6,height:6,borderRadius:"50%",background:"var(--warn)",animation:"pulse 0.8s infinite",display:"inline-block"}}/>Saving…</>
               : lastCloudSave
                 ? <><span style={{width:6,height:6,borderRadius:"50%",background:"var(--accent)",display:"inline-block"}}/>Saved</>
@@ -3725,7 +3882,7 @@ export default function TimetableBuilder() {
                   {initials(user.displayName||user.email||"?")}
                 </div>
             }
-            <Btn variant="ghost" size="xs" onClick={()=>signOutUser()} title="Sign out">Sign out</Btn>
+            <Btn variant="ghost" size="xs" onClick={handleSignOut} title="Sign out">Sign out</Btn>
           </div>
         ) : (
           <Btn variant="outline" size="xs" onClick={()=>signInWithGoogle()}>Sign in</Btn>
@@ -3821,7 +3978,29 @@ export default function TimetableBuilder() {
         <CollabModal onJoin={handleJoinRoom} onClose={()=>setShowCollab(false)} defaultName={userName}/>
       )}
 
+      {syncChoice&&(
+        <Modal title="Which timetable do you want to keep?"
+          subtitle="This browser and your cloud account have different versions"
+          onClose={()=>{ setSyncChoice(null); toast.push("Cloud sync is paused until you sign in again","warn"); }} width={480}>
+          <div style={{padding:20,fontSize:12,lineHeight:1.6,color:"var(--text)"}}>
+            <p style={{margin:"0 0 10px"}}>
+              Your cloud copy{syncChoice.savedAt?` (saved ${new Date(syncChoice.savedAt).toLocaleString()})`:""} has{" "}
+              <b>{Object.keys(syncChoice.remote.appointments||{}).length}</b> sessions.
+              This browser has <b>{Object.keys(state.appointments||{}).length}</b>.
+            </p>
+            <p style={{margin:"0 0 16px",color:"var(--muted)"}}>
+              Whichever you don't choose is replaced. A backup of this browser's version is kept if you load the cloud copy.
+            </p>
+            <div style={{display:"flex",gap:8}}>
+              <Btn variant="primary" onClick={chooseCloudCopy} style={{flex:1,justifyContent:"center"}}>Use cloud copy</Btn>
+              <Btn variant="outline" onClick={keepLocalCopy} style={{flex:1,justifyContent:"center"}}>Keep this browser's copy</Btn>
+            </div>
+          </div>
+        </Modal>
+      )}
+
       <Toasts list={toast.list} dismiss={toast.dismiss}/>
     </div>
+    </PresenceCtx.Provider>
   );
 }
