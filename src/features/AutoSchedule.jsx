@@ -2,8 +2,10 @@ import { useState, useMemo } from "react";
 import { DAYS as ALL_DAYS, DAYS_FULL, uid, ROOM_TYPES, getPalette } from "../constants.js";
 const DAYS = ALL_DAYS.slice(0, DAY_COUNT); // the auto-scheduler places sessions Monday to Friday
 import { DAY_COUNT, runAutoSchedule, slotMatrix, jobWeeks, seatsNeeded, reasonText, ALL_WEEKS } from "../scheduler.js";
-import { Btn, Badge, Field, MultiSelect, Segmented, EmptyState } from "../ui/kit.jsx";
+import { Btn, Badge, Field, Segmented, EmptyState } from "../ui/kit.jsx";
 import Icon from "../ui/Icon.jsx";
+import { askConfirm } from "../ui/Confirm.jsx";
+import GroupPicker from "../ui/GroupPicker.jsx";
 import AvailabilityGrid from "./AvailabilityGrid.jsx";
 
 const MODES = [
@@ -13,7 +15,7 @@ const MODES = [
 ];
 
 const blankJob = () => ({
-  id: uid(), courseId: "", instructorId: "", groupIds: [], roomId: "", preferRoomType: "", ignoreCapacity: false,
+  id: uid(), courseId: "", custom: false, customTitle: "", customCode: "", instructorId: "", groupIds: [], roomId: "", preferRoomType: "", ignoreCapacity: false,
   weeksMode: "all", weekStart: 1, weekEnd: 16, customWeeks: [], sessionsPerWeek: 1, mode: "prefer",
   useInstructorAvailability: true, preferDays: [], preferSlots: [], avoidSlots: [], replaceExisting: false, requireAll: false, _open: true,
 });
@@ -40,12 +42,13 @@ function JobCard({ job, ji, state, onUpdate, onRemove, onToggle, onInstructorAva
   const pal = course ? getPalette(course.id, courses) : null;
   const needed = seatsNeeded(job, groups);
   const biggest = rooms.length ? Math.max(...rooms.map(r => Number(r.capacity) || 0)) : 0;
-  const matrix = useMemo(() => job.courseId ? slotMatrix(state, toEngine(job)) : null,
+  const matrix = useMemo(() => (job.courseId || job.custom) ? slotMatrix(state, toEngine(job)) : null,
     [job, state.appointments, state.instructors, state.rooms, state.groups, state.holidays, state.slots, state.week1Start]);
 
   function pickCourse(courseId) {
     const c = courses.find(x => x.id === courseId);
-    onUpdate({ courseId, instructorId: c?.defaultInstructorId || "", groupIds: c?.defaultGroupIds || [] });
+    if (courseId === "__other") { onUpdate({ courseId: "", custom: true, instructorId: "", groupIds: [] }); return; }
+    onUpdate({ courseId, custom: false, instructorId: c?.defaultInstructorId || "", groupIds: c?.defaultGroupIds || [] });
   }
   const weeks = jobWeeks(job);
 
@@ -55,7 +58,7 @@ function JobCard({ job, ji, state, onUpdate, onRemove, onToggle, onInstructorAva
         style={{ width: "100%", padding: "12px 14px", display: "flex", alignItems: "center", gap: 10, textAlign: "left", background: job._open ? "var(--bg3)" : "transparent", borderBottom: job._open ? "1px solid var(--border)" : "none" }}>
         <span style={{ font: "600 13px var(--mono)", color: "var(--muted2)", width: 20 }}>{ji + 1}</span>
         <span style={{ fontWeight: 600, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {course ? `${course.code}  ${course.name}` : "New job: choose a course"}
+          {course ? `${course.code}  ${course.name}` : job.custom ? `${job.customCode || "EXTRA"}  ${job.customTitle || "Other event"}` : "New job: choose a course"}
         </span>
         {matrix && <Badge color={matrix.feasible > 0 ? "green" : "yellow"}>{matrix.feasible > 0 ? `${matrix.feasible} time${matrix.feasible === 1 ? "" : "s"} free every week` : "No time free every week"}</Badge>}
         <Icon name={job._open ? "up" : "down"} size={16} style={{ color: "var(--muted)" }} />
@@ -65,11 +68,17 @@ function JobCard({ job, ji, state, onUpdate, onRemove, onToggle, onInstructorAva
         <div style={{ padding: 16 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "0 14px" }}>
             <Field label="Course" required>
-              <select value={job.courseId} onChange={e => pickCourse(e.target.value)}>
+              <select value={job.custom ? "__other" : job.courseId} onChange={e => pickCourse(e.target.value)}>
                 <option value="">Choose a course…</option>
                 {courses.map(c => <option key={c.id} value={c.id}>{c.code}  {c.name}</option>)}
+                <option value="__other">Other event (extra class, workshop, exam…)</option>
               </select>
             </Field>
+            {job.custom && (
+              <Field label="Event title" required hint="Shown on the timetable">
+                <input value={job.customTitle} onChange={e => onUpdate({ customTitle: e.target.value })} placeholder="e.g. Extra class: Machine Learning" />
+              </Field>
+            )}
             <Field label="Instructor">
               <select value={job.instructorId} onChange={e => onUpdate({ instructorId: e.target.value })}>
                 <option value="">None</option>
@@ -78,7 +87,7 @@ function JobCard({ job, ji, state, onUpdate, onRemove, onToggle, onInstructorAva
             </Field>
           </div>
           <Field label="Student groups" hint="The scheduler avoids clashes for these groups, and picks a room big enough for them.">
-            <MultiSelect options={groups.map(g => ({ value: g.id, label: `${g.name}${g.size ? ` (${g.size})` : ""}` }))} value={job.groupIds} onChange={v => onUpdate({ groupIds: v })} placeholder="Choose groups…" />
+            <GroupPicker groups={groups} showSize value={job.groupIds} onChange={v => onUpdate({ groupIds: v })} placeholder="Choose groups…" />
           </Field>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "0 14px" }}>
@@ -283,18 +292,19 @@ export default function AutoScheduleTab({ state, setState, toast }) {
   const [included, setIncluded] = useState({});     // job id -> bool
 
   const updateJob = (id, patch) => setJobs(j => j.map(x => x.id === id ? { ...x, ...patch } : x));
-  const ready = jobs.filter(j => j.courseId);
+  const ready = jobs.filter(j => j.courseId || (j.custom && j.customTitle.trim()));
 
   function run() {
     const res = runAutoSchedule(state, ready.map(toEngine), { makeId: uid });
     setResult(res);
     setIncluded(Object.fromEntries(res.reports.map(r => [r.job.id, r.placed.length > 0])));
   }
-  function commit() {
+  async function commit() {
     const take = result.reports.filter(r => included[r.job.id] && r.placed.length);
     const add = take.flatMap(r => r.placed);
     const drop = new Set(take.flatMap(r => r.removed));
     if (!add.length) return;
+    if (drop.size && !await askConfirm({ title: "Replace existing sessions?", message: `${drop.size} existing session${drop.size === 1 ? "" : "s"} will be removed to make room for ${add.length} new one${add.length === 1 ? "" : "s"}.`, detail: "Pinned sessions are never touched. You can undo this afterwards.", confirmLabel: "Replace and add" })) return;
     setState(s => {
       const next = { ...s.appointments };
       drop.forEach(id => delete next[id]);

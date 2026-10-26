@@ -439,3 +439,21 @@ describe("never creates a clash (randomised)", () => {
     }
   });
 });
+
+describe("custom events (not a course)", () => {
+  it("places an extra class that has its own title and no course", () => {
+    const s = base();
+    const res = runAutoSchedule(s, [job({ courseId: "", custom: true, customTitle: "Extra class: Maths", customCode: "XTRA", weeks: [3], groupIds: ["a"] })], { makeId: counter });
+    expect(res.reports[0].status).toBe("full");
+    const a = res.scheduled[0];
+    expect(a.courseId).toBe("");
+    expect(a.courseName).toBe("Extra class: Maths");
+    expect(a.courseCode).toBe("XTRA");
+    expect(a.weekNum).toBe(3);
+  });
+  it("avoids the groups' existing classes like any other job", () => {
+    const s = base({ appointments: { x: appt("x", 1, 0, "am", { groupIds: ["a"] }) } });
+    const res = runAutoSchedule(s, [job({ courseId: "", custom: true, customTitle: "Workshop", weeks: [1], groupIds: ["a"] })], { makeId: counter });
+    expect(getAllConflicts(merge(s, res).appointments, SLOTS)).toEqual([]);
+  });
+});
