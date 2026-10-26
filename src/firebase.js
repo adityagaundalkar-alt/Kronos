@@ -3,6 +3,8 @@ import {
   getAuth,
   GoogleAuthProvider,
   signInWithPopup,
+  linkWithPopup,
+  signInWithCredential,
   signInAnonymously,
   signOut,
   onAuthStateChanged
@@ -46,6 +48,27 @@ const googleProvider = new GoogleAuthProvider();
 
 // --- Auth Functions ---
 export const signInWithGoogle = () => signInWithPopup(auth, googleProvider);
+
+/** The signed-in user right now (Firebase does not announce a link, so the app asks). */
+export const currentUser = () => auth.currentUser;
+
+/**
+ * Sign in with Google. When this browser only has the anonymous identity that holds term access (an admin's rights
+ * live there), LINK Google to it instead: the identity, and so every admin right, stays; it just becomes recoverable.
+ * Resolves to { linked: true } when it linked and { linked: false } when it signed in to an existing Google account.
+ */
+export const linkWithGoogle = async () => {
+  const cu = auth.currentUser;
+  if (!cu || !cu.isAnonymous) { await signInWithPopup(auth, googleProvider); return { linked: false }; }
+  try { await linkWithPopup(cu, googleProvider); return { linked: true }; }
+  catch (e) {
+    if (e?.code === "auth/credential-already-in-use" || e?.code === "auth/email-already-in-use") { // this Google account is already a different identity
+      const cred = GoogleAuthProvider.credentialFromError(e);
+      if (cred) { await signInWithCredential(auth, cred); return { linked: false }; }
+    }
+    throw e;
+  }
+};
 
 /** Turn a Firebase auth error into something a person can act on. `silent` = not worth showing. */
 export const explainAuthError = (e) => {
@@ -129,6 +152,15 @@ export const loadRoom = async (code) => {
 };
 
 export const writeRoomTree = (code, tree) => set(roomRef(code, "v2"), tree);
+
+// --- Saved versions: rooms/<rid>/versions/<id> = { name, at, by, kind, sessions, courses, data } ---
+export const listVersions = async (rid) => {
+  const v = await store.get(`rooms/${rid}/versions`);
+  return v ? Object.entries(v).map(([id, x]) => ({ id, ...x })).sort((a, b) => b.at - a.at) : [];
+};
+export const newVersionId = (rid) => push(roomRef(rid, "versions")).key;
+export const saveVersion = (rid, id, version) => store.set(`rooms/${rid}/versions/${id}`, version);
+export const deleteVersion = (rid, id) => store.remove(`rooms/${rid}/versions/${id}`);
 
 /** Multi-path update of changed items only: { "appointments/abc": {...}, "courses/x": null } */
 export const updateRoom = (code, updates) =>

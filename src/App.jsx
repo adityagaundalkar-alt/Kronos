@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo, useContext } from "react";
-import { signInWithGoogle, explainAuthError, signOutUser, ensureAuth, onAuthChange, access, loadRoom, listMyTerms, saveMyTerm, removeMyTerm } from "./firebase.js";
+import { signInWithGoogle, linkWithGoogle, currentUser, explainAuthError, signOutUser, ensureAuth, onAuthChange, access, loadRoom, listMyTerms, saveMyTerm, removeMyTerm } from "./firebase.js";
 import { iso, parseISO, addDays, fmt, fmtLong, getWeekStart, slotDate } from "./dates.js";
 import { treeToState } from "./sync.js";
 import { checkConflicts, getAllConflicts } from "./conflicts.js";
@@ -7,6 +7,9 @@ import { slotRange, customLabel, timeLabel, startKey, validateCustomTimes, fromM
 import { DAYS, DAYS_FULL, WEEKS, PALETTE, ROOM_TYPES, CATEGORIES, uid, initials, getPalette, paletteById } from "./constants.js";
 import { emptyState, termFrom, sanitizeState, loadLocal, saveLocal, backupLocalState, loadRecentRooms, forgetRoom } from "./state.js";
 import { PresenceCtx, CollabCtx } from "./collab/context.js";
+import VersionsPanel from "./features/Versions.jsx";
+import useVersions from "./collab/useVersions.js";
+import { stateFromVersion } from "./versions.js";
 import { planMoves, shiftMoves } from "./move.js";
 import { planRepeat } from "./repeat.js";
 import { suggestFixes } from "./fixes.js";
@@ -21,7 +24,7 @@ import AvailabilityGrid from "./features/AvailabilityGrid.jsx";
 import { CommentsPanel, CommentsTab } from "./features/Comments.jsx";
 import AutoScheduleTab from "./features/AutoSchedule.jsx";
 import { useCollaboration } from "./collab/useCollaboration.js";
-import { CollabModal, ShareModal, RoomBar, AccessLostModal, ActivityFeed, RolePill } from "./collab/CollabUI.jsx";
+import { CollabModal, ShareModal, RoomBar, AdminKeepBanner, AccessLostModal, ActivityFeed, RolePill } from "./collab/CollabUI.jsx";
 import { codeFromSearch, ROLE_LABEL } from "./access.js";
 import { Rail, TabBar, MoreSheet, visibleViews, VIEWS } from "./shell/Shell.jsx";
 import LoginScreen from "./shell/Login.jsx";
@@ -1917,15 +1920,12 @@ function ConflictsTab({conflicts,state,onApptClick,onFix}) {
 // ═══════════════════════════════════════════════════════════════════
 //  CHANGELOG TAB
 // ═══════════════════════════════════════════════════════════════════
-function ChangelogTab({log}) {
-  if(!log.length) return (
-    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",color:"var(--muted2)",fontSize:13}}>
-      No activity yet
-    </div>
-  );
+function ChangelogTab({log,versions,canEdit,onRestore,termName}) {
   return (
-    <div style={{padding:16,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",height:"100%"}}>
-      <div style={{fontSize:14,fontWeight:600,marginBottom:12}}>Activity Log</div>
+    <div style={{padding:16,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",flex:1}}>
+      <VersionsPanel versions={versions} canEdit={canEdit} onRestore={onRestore} defaultName={termName}/>
+      <h2 style={{fontSize:15,fontWeight:700,marginBottom:12}}>Activity log</h2>
+      {!log.length&&<div style={{fontSize:14,color:"var(--muted2)"}}>No activity yet</div>}
       {[...log].reverse().map((e,i)=>(
         <div key={i} style={{display:"flex",gap:10,marginBottom:8,paddingBottom:8,
           borderBottom:"1px solid var(--border)"}}>
@@ -1994,7 +1994,7 @@ function SettingsTab({state,setState,toast}) {
         if(!data||typeof data!=="object") throw new Error("bad file");
         const have=Object.keys(state.appointments||{}).length+state.courses.length;
         if(have&&!await askConfirm({title:"Replace this term's data?",message:"Importing replaces everything in this term with the contents of the file.",detail:`Now: ${Object.keys(state.appointments||{}).length} sessions and ${state.courses.length} courses. In the file: ${Object.keys(data.appointments||{}).length} sessions and ${(data.courses||[]).length} courses. You can undo it afterwards.`,confirmLabel:"Replace data"})) return;
-        setState({...data,settings:{...data.settings,semester:state.settings.semester||data.settings?.semester||""}}); // the term keeps its own name
+        setState({...data,settings:{...data.settings,semester:state.settings.semester||data.settings?.semester||""}},"imported data"); // the term keeps its own name
         toast("Data imported successfully. You can undo it.","ok");
       } catch { toast("Invalid file format","error"); }
     };
@@ -2091,7 +2091,8 @@ function useAuth() {
     setUser(u && !u.isAnonymous ? u : null);
     setLoading(false);
   }), []);
-  return { user, authUid, loading };
+  const refreshUser = useCallback(() => { const u = currentUser(); setAuthUid(u?.uid || null); setUser(u && !u.isAnonymous ? { ...u } : null); }, []);
+  return { user, authUid, loading, refreshUser };
 }
 
 const readName = () => { try { return localStorage.getItem("kronos_user") || ""; } catch { return ""; } };
@@ -2102,7 +2103,7 @@ const writeName = n => { try { localStorage.setItem("kronos_user", n); } catch {
 // ═══════════════════════════════════════════════════════════════════
 export default function TimetableBuilder() { return <ConfirmProvider><Builder /></ConfirmProvider>; }
 function Builder() {
-  const { user, authUid, loading: authLoading } = useAuth();
+  const { user, authUid, loading: authLoading, refreshUser } = useAuth();
   const theme = useTheme();
   const [joinLinkCode] = useState(() => codeFromSearch(typeof window !== "undefined" ? window.location.search : ""));
   const [skipAuth, setSkipAuth] = useState(!!joinLinkCode);
@@ -2138,8 +2139,20 @@ function Builder() {
     return true;
   }, [commit]);
 
+  const versionsRef = useRef({ autoSave() {} });
   const collab = useCollaboration({ getState: () => stateRef.current, applyRemote, toast: toast.push, sanitize: sanitizeState, backup: backupLocalState });
   const { session, canEdit } = collab;
+  const versions = useVersions({ rid: session?.rid || null, who: user?.displayName || userName, canEdit });
+  versionsRef.current = versions;
+  const versionsApi = { ...versions, saveNow: name => versions.save(stateRef.current, { name }) };
+  async function restoreVersion(v) {
+    let next;
+    try { next = stateFromVersion(v, stateRef.current); } catch { return "This version is damaged and can't be restored."; }
+    await versions.save(stateRef.current, { name: `Before restoring “${v.name}”`, kind: "auto" });
+    setState(next, "restored version", v.name);
+    toast.push(`Restored “${v.name}”. You can undo it.`, "ok");
+    return "";
+  }
 
   // Viewers can't change the timetable, whatever the UI does.
   const canEditRef = useRef(true);
@@ -2158,6 +2171,7 @@ function Builder() {
     commit(next);
     collab.pushDiff(prev, next, opType, opDetail);
     const changes = changesBetween(prev, next);
+    if ((changes.length >= 25 || opType === "cleared term") && (Object.keys(prev.appointments || {}).length || (prev.courses || []).length)) versionsRef.current.autoSave(prev, `Before ${opType || "a big change"}`); // a safety copy of what is about to be replaced
     if (changes.length) {
       undoStack.current = [...undoStack.current, { changes, label: opType || "change" }].slice(-MAX_HISTORY);
       redoStack.current = [];
@@ -2220,6 +2234,10 @@ function Builder() {
     setTermList([...byCode.values()].sort((a, b) => (b.at || 0) - (a.at || 0)));
   }, [user?.uid]);
   useEffect(() => { refreshTerms(); }, [refreshTerms, session?.code, session?.archived, session?.roomName]);
+  useEffect(() => { // signing in: the terms this browser already knows go into the account too, so any device can list them
+    if (!user) return;
+    loadRecentRooms().forEach(t => { if (t.code) saveMyTerm(user.uid, { code: t.code, name: t.name || "", role: t.role || "", archived: !!t.archived, at: t.at || Date.now() }).catch(() => {}); });
+  }, [user?.uid]);
   useEffect(() => { // remember the open term in the account so any device can list it
     if (user && session && session.code) saveMyTerm(user.uid, { code: session.code, name: session.roomName || "", role: session.role, archived: !!session.archived, at: Date.now() }).catch(() => {});
   }, [user?.uid, session?.code, session?.roomName, session?.role, session?.archived]);
@@ -2276,7 +2294,11 @@ function Builder() {
   }
 
   async function handleSignIn() {
-    try { await signInWithGoogle(); }
+    try {
+      const res = await linkWithGoogle();
+      refreshUser(); // linking keeps the same identity, so the sign-in listener doesn't fire
+      if (res.linked) toast.push("Signed in. Your admin access and terms now follow your Google account, on any device.", "ok", 7000);
+    }
     catch (e) { const x = explainAuthError(e); if (!x.silent) toast.push(x.message, "warn", 10000); }
   }
   async function handleSignOut() {
@@ -2417,6 +2439,7 @@ function Builder() {
             <RoomBar session={session} presence={collab.presence} syncing={collab.syncing} lastSyncAt={collab.lastSyncAt}
               onShare={() => setShowShare(true)} onLeave={handleSwitchTerm} />
           )}
+          {session && session.role === "admin" && !session.legacy && !user && !session.archived && <AdminKeepBanner session={session} onSignIn={handleSignIn} />}
           <main className="view" id="main">
             {tab === "schedule" && <ScheduleTab state={state} onApptClick={handleApptClick} onCellClick={handleCellClick} conflicts={openConflicts} onMove={moveSessions} onDeleteMany={deleteSessions} />}
             {tab === "dashboard" && <DashboardTab state={state} conflicts={openConflicts} />}
@@ -2426,7 +2449,7 @@ function Builder() {
             {tab === "instructor" && <InstructorTab state={state} onApptClick={handleApptClick} />}
             {tab === "conflicts" && <ConflictsTab conflicts={conflicts} state={state} onApptClick={handleApptClick} onFix={canEdit ? handleFix : null} />}
             {tab === "comments" && session && <CommentsTab state={state} onOpenAppt={ref => { const id = typeof ref === "string" ? ref : ref?.id; const a = (id && state.appointments[id]) || (typeof ref === "object" ? ref : null); if (a) setModal({ appt: a }); else toast.push("That session no longer exists", "warn"); }} />}
-            {tab === "changelog" && canEdit && <ChangelogTab log={state.changelog} />}
+            {tab === "changelog" && canEdit && <ChangelogTab log={state.changelog} versions={versionsApi} canEdit={canEdit} onRestore={restoreVersion} termName={state.settings.semester} />}
             {tab === "settings" && canEdit && <SettingsTab state={state} setState={setState} toast={toast.push} />}
             {tab === "activity" && session && <ActivityFeed roomCode={session.roomCode} presence={collab.presence} selfId={session.userId} />}
           </main>
