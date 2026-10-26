@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
-import { DAYS, DAYS_FULL, uid, ROOM_TYPES, getPalette } from "../constants.js";
-import { runAutoSchedule, slotMatrix, jobWeeks, seatsNeeded, reasonText, ALL_WEEKS } from "../scheduler.js";
+import { DAYS as ALL_DAYS, DAYS_FULL, uid, ROOM_TYPES, getPalette } from "../constants.js";
+const DAYS = ALL_DAYS.slice(0, DAY_COUNT); // the auto-scheduler places sessions Monday to Friday
+import { DAY_COUNT, runAutoSchedule, slotMatrix, jobWeeks, seatsNeeded, reasonText, ALL_WEEKS } from "../scheduler.js";
 import { Btn, Badge, Field, MultiSelect, Segmented, EmptyState } from "../ui/kit.jsx";
 import Icon from "../ui/Icon.jsx";
 import AvailabilityGrid from "./AvailabilityGrid.jsx";

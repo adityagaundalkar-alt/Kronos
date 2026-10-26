@@ -3,8 +3,14 @@
 // timeslots.js, so custom session times are respected everywhere.
 import { sessionsOverlap } from "./timeslots.js";
 
+// Two sessions of the same course that are different sections (e.g. "Group 1" and "Group 2") are meant to
+// run at the same time: the cohort is split between them, so they don't clash on student groups.
+const parallelSections = (a, b) => !!a.courseId && a.courseId === b.courseId && !!a.section && !!b.section && a.section !== b.section;
+
 const norm = a => ({
   ...a,
+  courseId: a.courseId || "",
+  section: a.section || "",
   groupIds: Array.isArray(a.groupIds) ? a.groupIds : [],
   instructorId: a.instructorId || "",
   roomId: a.roomId || "",
@@ -25,7 +31,7 @@ export function checkConflicts(appointments, appt, slots, excludeId = null) {
       out.push({ type: "instructor", label: "Instructor double-booked", clash });
     if (cand.roomId && a.roomId === cand.roomId)
       out.push({ type: "room", label: "Room already occupied", clash });
-    if (cand.groupIds.some(g => a.groupIds.includes(g)))
+    if (!parallelSections(a, cand) && cand.groupIds.some(g => a.groupIds.includes(g)))
       out.push({ type: "group", label: "Student group clash", clash });
   });
   return out;
@@ -49,7 +55,7 @@ export function getAllConflicts(appointments, slots) {
           all.push({ type: "instructor", a, b, label: "Instructor double-booked" });
         if (a.roomId && a.roomId === b.roomId)
           all.push({ type: "room", a, b, label: "Room double-booked" });
-        if (a.groupIds.some(x => b.groupIds.includes(x)))
+        if (!parallelSections(a, b) && a.groupIds.some(x => b.groupIds.includes(x)))
           all.push({ type: "group", a, b, label: "Student group clash" });
       }
     });
