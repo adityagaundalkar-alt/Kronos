@@ -3494,7 +3494,7 @@ function LoginScreen({ onSkip }) {
           display:"flex",alignItems:"center",justifyContent:"center",
           fontSize:22,fontWeight:800,color:"#fff",margin:"0 auto 16px"}}>K</div>
 
-        <div style={{fontSize:22,fontWeight:700,marginBottom:6}}>Welcome to Kronos</div>
+        <div style={{fontSize:22,fontWeight:700,marginBottom:6}}>Welcome to Kronos 2.0</div>
         <div style={{fontSize:13,color:"var(--muted)",marginBottom:28}}>
           Sign in to save your timetable and collaborate with your team
         </div>
@@ -3675,7 +3675,7 @@ export default function TimetableBuilder() {
           <div style={{width:26,height:26,borderRadius:7,background:"var(--accent)",
             display:"flex",alignItems:"center",justifyContent:"center",
             fontSize:12,fontWeight:800,color:"#fff",flexShrink:0}}>K</div>
-          <span style={{fontSize:14,fontWeight:700,letterSpacing:"-0.01em"}}>Kronos</span>
+          <span style={{fontSize:14,fontWeight:700,letterSpacing:"-0.01em"}}>Kronos 2.0</span>
           <span style={{fontSize:12,color:"var(--muted)",marginLeft:2}}>{state.settings.semester}</span>
         </div>
         <div style={{flex:1}}/>

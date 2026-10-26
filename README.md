@@ -1,4 +1,4 @@
-# Kronos — Collaborative Timetable Builder
+# Kronos 2.0 — Collaborative Timetable Builder
 
 A full-featured academic timetable scheduling app built with React + Vite.
 
