@@ -1,0 +1,20 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "users": {
+      "$uid": {
+        ".read":  "auth != null && auth.uid === $uid && auth.token.firebase.sign_in_provider !== 'anonymous'",
+        ".write": "auth != null && auth.uid === $uid && auth.token.firebase.sign_in_provider !== 'anonymous'"
+      }
+    },
+
+    "rooms": {
+      "$code": {
+        ".read":  "auth != null && $code.matches(/^[A-Z0-9]{6,8}$/)",
+        ".write": "auth != null && $code.matches(/^[A-Z0-9]{6,8}$/)"
+      }
+    }
+  }
+}

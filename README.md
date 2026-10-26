@@ -1,4 +1,4 @@
-# Kronos — Collaborative Timetable Builder
+# Kronos 2.0 — Collaborative Timetable Builder
 
 A full-featured academic timetable scheduling app built with React + Vite.
 
@@ -6,7 +6,8 @@ A full-featured academic timetable scheduling app built with React + Vite.
 - Visual weekly schedule grid (Orientation + 16 weeks)
 - Auto-scheduler with instructor availability & conflict detection
 - Dashboard with load charts and session analytics
-- Collaborative rooms with live presence (Firebase-ready)
+- Collaborative rooms with live presence and per-item sync (Firebase)
+- Optional custom start/end times for a session inside a slot (e.g. 10:00–11:30 in a 09:00–12:00 slot); clashes are detected by real time overlap, back-to-back sessions are fine
 - Courses, instructors, rooms, student groups management
 - Export to CSV / JSON
 
@@ -44,35 +45,38 @@ That's it. You get a live `https://kronos-timetable.vercel.app` URL.
 
 ---
 
-## Enable Real-time Collaboration (Firebase)
+## Real-time collaboration (Firebase)
 
-The app ships with localStorage-based collab stubs so it works offline.
-To enable true real-time multi-user sync:
+Teams collaborate by sharing a **room code**. Everyone with the code can edit the
+timetable together; each change is saved per item (a session, a course, a room...)
+so two people editing at once don't overwrite each other, and deletions stay deleted.
+You can see who is online and which session each person has open.
 
-### 1. Create a Firebase project
-1. Go to https://console.firebase.google.com
-2. Create project → Add web app → copy `firebaseConfig`
-3. Go to **Realtime Database** → Create database → Start in test mode
+The Firebase project is configured in `src/firebase.js`. To set up or secure it:
 
-### 2. Install Firebase
+1. **Enable Anonymous sign-in** — Firebase Console → Authentication → Sign-in method →
+   Anonymous → Enable. People who join with just a room code get an anonymous identity,
+   which lets the database rules require a signed-in user without making them log in.
+2. **Publish the security rules** — Firebase Console → Realtime Database → Rules, paste
+   the contents of [`database.rules.json`](database.rules.json) and Publish.
+   These rules stop anyone listing all rooms, and only allow access to a room by its code.
+3. Keep Google sign-in enabled (Authentication → Sign-in method) for personal cloud save.
+
+Room codes are 8 characters from a cryptographic random source. Treat the code like a
+password: anyone who has it can edit that room's timetable.
+
+Rooms created with the older version are migrated automatically the first time someone
+joins them.
+
+---
+
+## Tests
+
 ```bash
-npm install firebase
+npm test
 ```
-
-### 3. Configure environment
-```bash
-cp .env.example .env.local
-# Fill in your Firebase values in .env.local
-```
-
-### 4. Swap the collab functions
-Open `src/firebase.js` and follow the instructions inside — uncomment the
-Firebase implementation and import those functions into `App.jsx` in place
-of the localStorage stubs (search for `colLoad`, `colSave`, etc.).
-
-### 5. Add env vars to Vercel
-In your Vercel project → Settings → Environment Variables, add each
-`VITE_FIREBASE_*` key from your `.env.local`.
+Covers the date helpers (in several timezones), the per-item sync logic, and a
+simulation of two people editing the same room at once.
 
 ---
 
@@ -80,6 +84,7 @@ In your Vercel project → Settings → Environment Variables, add each
 ```
 kronos/
 ├── index.html          # Entry HTML
+├── database.rules.json # Firebase Realtime Database security rules (publish in the console)
 ├── vite.config.js      # Vite config
 ├── vercel.json         # SPA routing for Vercel
 ├── .env.example        # Firebase env template
@@ -87,6 +92,12 @@ kronos/
 │   └── favicon.svg
 └── src/
     ├── main.jsx        # React root mount
-    ├── App.jsx         # Full application (single file)
-    └── firebase.js     # Firebase setup + collab functions (ready to enable)
+    ├── App.jsx         # Application UI
+    ├── dates.js        # Timezone-safe date helpers
+    ├── sync.js         # Per-item sync logic (pure, tested)
+    ├── timeslots.js    # Slot / custom-time parsing and overlap rules (pure, tested)
+    ├── conflicts.js    # Conflict engine (pure, tested)
+    ├── roomClient.js   # Room collaboration core (tested with simulated clients)
+    └── firebase.js     # Firebase setup, auth, rooms, presence
+tests/                  # npm test
 ```
