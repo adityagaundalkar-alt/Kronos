@@ -9,6 +9,8 @@ import {
 import { iso, parseISO, addDays, mondayOf, fmt, fmtLong, getWeekStart, slotDate } from "./dates.js";
 import { same } from "./sync.js";
 import { createRoomClient } from "./roomClient.js";
+import { checkConflicts, getAllConflicts, isInstructorFreeAllWeeks, areGroupsFreeAllWeeks, isRoomFree } from "./conflicts.js";
+import { slotRange, customLabel, timeLabel, startKey, validateCustomTimes, fromMinutes } from "./timeslots.js";
 
 // ═══════════════════════════════════════════════════════════════════
 //  CONSTANTS
@@ -198,51 +200,7 @@ function sanitizeState(s) {
   };
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  CONFLICT ENGINE
-// ═══════════════════════════════════════════════════════════════════
-function checkConflicts(appointments,appt,wn,di,ti,excludeId=null) {
-  const out=[];
-  const safeAppt={...appt,groupIds:Array.isArray(appt.groupIds)?appt.groupIds:[]};
-  Object.values(appointments).forEach(raw=>{
-    const a={...raw,groupIds:Array.isArray(raw.groupIds)?raw.groupIds:[],instructorId:raw.instructorId||"",roomId:raw.roomId||""};
-    if(a.weekNum!==wn||a.dayIdx!==di||a.timeId!==ti||a.id===excludeId) return;
-    if(safeAppt.instructorId&&a.instructorId===safeAppt.instructorId)
-      out.push({type:"instructor",label:"Instructor double-booked",clash:a.courseName||a.courseCode});
-    if(safeAppt.roomId&&a.roomId===safeAppt.roomId)
-      out.push({type:"room",label:"Room already occupied",clash:a.courseName||a.courseCode});
-    const grpClash=safeAppt.groupIds.filter(g=>a.groupIds.includes(g));
-    if(grpClash.length)
-      out.push({type:"group",label:"Student group clash",clash:a.courseName||a.courseCode});
-  });
-  return out;
-}
-function getAllConflicts(appointments) {
-  const all=[];
-  if(!appointments||typeof appointments!=="object") return all;
-  // Always sanitize here — Firebase may strip empty arrays on any path
-  const list=Object.values(appointments).filter(Boolean).map(a=>({
-    ...a,
-    groupIds:Array.isArray(a.groupIds)?a.groupIds:[],
-    instructorId:a.instructorId||"",
-    roomId:a.roomId||"",
-    weekNum:a.weekNum??0,
-    dayIdx:a.dayIdx??0,
-    timeId:a.timeId||"",
-  }));
-  list.forEach((a,i)=>{
-    list.slice(i+1).forEach(b=>{
-      if(a.weekNum!==b.weekNum||a.dayIdx!==b.dayIdx||a.timeId!==b.timeId) return;
-      if(a.instructorId&&a.instructorId===b.instructorId)
-        all.push({type:"instructor",a,b,label:"Instructor double-booked"});
-      if(a.roomId&&a.roomId===b.roomId)
-        all.push({type:"room",a,b,label:"Room double-booked"});
-      const g=a.groupIds.filter(x=>b.groupIds.includes(x));
-      if(g.length) all.push({type:"group",a,b,label:"Student group clash"});
-    });
-  });
-  return all;
-}
+// Conflict detection lives in ./conflicts.js (time-overlap aware; see ./timeslots.js)
 
 // ═══════════════════════════════════════════════════════════════════
 //  TOAST HOOK
@@ -511,7 +469,24 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
     }));
   },[form.courseId]);
 
-  const conflicts=useMemo(()=>checkConflicts(appointments,form,form.weekNum,form.dayIdx,form.timeId,isEdit?appt.id:null),[form,appointments]);
+  // Optional custom start/end inside the slot (e.g. 10:00-11:30 in a 09:00-12:00 slot)
+  const [useCustom,setUseCustom]=useState(()=>isEdit&&!!(appt.start&&appt.end));
+  const slotObj=slots.find(s=>s.id===form.timeId);
+  const timesCheck=useCustom?validateCustomTimes(form.start,form.end,slotObj):{ok:true,message:"",outsideSlot:false};
+  function toggleCustom(on) {
+    setUseCustom(on);
+    if(on) {
+      const r=slotRange(slotObj); // start from the slot's own window so nothing changes until edited
+      setForm(f=>({...f,start:f.start||(r?fromMinutes(r.start):"09:00"),end:f.end||(r?fromMinutes(r.end):"10:00")}));
+    }
+  }
+  // What the session will actually be saved as (no leftover times when custom is off)
+  const effective=useMemo(()=>{
+    const {start,end,...rest}=form;
+    return useCustom?{...rest,start,end}:rest;
+  },[form,useCustom]);
+
+  const conflicts=useMemo(()=>checkConflicts(appointments,effective,slots,isEdit?appt.id:null),[effective,appointments,slots]);
   const blockingConflicts=conflicts.filter(c=>!overrides[c.type]);
 
   function handleSave() {
@@ -519,11 +494,12 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
     if(deletedRemotely) return; // someone else deleted it - saving would silently resurrect it
     if(blockingConflicts.length) return;
     const course=courses.find(x=>x.id===form.courseId);
-    const base={...form,courseName:course?.name,courseCode:course?.code,section:form.section||""};
+    if(!timesCheck.ok) return;
+    const base={...effective,courseName:course?.name,courseCode:course?.code,section:form.section||""};
     const toSave=[];
     if(scheduleAll&&!isEdit) {
       WEEKS.filter(w=>w.n>0).forEach(w=>{
-        const wConflicts=checkConflicts(appointments,{...base,weekNum:w.n},w.n,form.dayIdx,form.timeId);
+        const wConflicts=checkConflicts(appointments,{...base,weekNum:w.n},slots);
         if(!wConflicts.length) toSave.push({...base,id:uid(),weekNum:w.n});
       });
     } else {
@@ -537,7 +513,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
 
   return (
     <Modal title={isEdit?"Edit Session":"New Session"}
-      subtitle={isEdit?`${appt.courseCode} · ${DAYS_FULL[appt.dayIdx]} ${slots.find(s=>s.id===appt.timeId)?.short||appt.timeId}`:"Schedule a new class session"}
+      subtitle={isEdit?`${appt.courseCode} · ${DAYS_FULL[appt.dayIdx]} ${slots.find(s=>s.id===appt.timeId)?.short||appt.timeId}${customLabel(appt)?" · "+customLabel(appt):""}`:"Schedule a new class session"}
       onClose={onClose} width={520}>
       <div style={{padding:20,display:"flex",flexDirection:"column",gap:0}}>
         {deletedRemotely&&(
@@ -591,6 +567,38 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
               {slots.map(s=><option key={s.id} value={s.id}>{s.short}</option>)}
             </select>
           </Field>
+        </div>
+
+        {/* Optional custom time within the slot */}
+        <div style={{marginBottom:12}}>
+          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:11,color:"var(--muted)",cursor:"pointer"}}>
+            <input type="checkbox" checked={useCustom} onChange={e=>toggleCustom(e.target.checked)}
+              style={{width:"auto",margin:0}}/>
+            Custom time {slotObj&&<span style={{color:"var(--muted2)"}}>(default: whole slot{slotObj.label?`, ${slotObj.label}`:""})</span>}
+          </label>
+          {useCustom&&(
+            <div style={{marginTop:8}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                <Field label="Starts">
+                  <input type="time" value={form.start||""} onChange={e=>setForm(f=>({...f,start:e.target.value}))}/>
+                </Field>
+                <Field label="Ends">
+                  <input type="time" value={form.end||""} onChange={e=>setForm(f=>({...f,end:e.target.value}))}/>
+                </Field>
+              </div>
+              {!timesCheck.ok&&<div style={{fontSize:11,color:"var(--danger)",marginTop:-4}}>{timesCheck.message}</div>}
+              {timesCheck.ok&&timesCheck.outsideSlot&&(
+                <div style={{fontSize:11,color:"var(--warn)",marginTop:-4}}>
+                  These times extend outside the {slotObj?.short||"slot"} window; the session will still show in that slot.
+                </div>
+              )}
+              {!slotRange(slotObj)&&(
+                <div style={{fontSize:10,color:"var(--muted2)",marginTop:2}}>
+                  Tip: put times in the slot name (Settings, e.g. "09:00 – 12:00") so sessions in different slots can be checked against each other.
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Instructor + Room */}
@@ -669,7 +677,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete}) {
           <div style={{display:"flex",gap:8}}>
             <Btn variant="outline" onClick={onClose}>Cancel</Btn>
             <Btn variant="primary" onClick={handleSave}
-              disabled={!form.courseId||blockingConflicts.length>0}
+              disabled={!form.courseId||blockingConflicts.length>0||!timesCheck.ok||deletedRemotely}
               style={{minWidth:90}}>
               {isEdit?"Update":"Schedule"}
             </Btn>
@@ -716,6 +724,11 @@ function ApptChip({appt,courses,instructors,rooms,onClick,conflicts=[]}) {
           background:"rgba(0,0,0,0.06)",padding:"1px 4px",borderRadius:3}}>
           {appt.courseCode}{appt.section?` §${appt.section}`:""}
         </span>
+        {customLabel(appt)&&(
+          <span title="Custom time" style={{fontSize:8,fontFamily:"var(--mono)",color:"var(--muted)"}}>
+            {customLabel(appt)}
+          </span>
+        )}
       </div>
       <div style={{fontSize:10,fontWeight:500,color:pal.accent,lineHeight:1.3,
         whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
@@ -777,18 +790,27 @@ function exportCohortHTML(state, groupId) {
     DAYS.forEach((_,di)=>{
       slots.forEach(s=>{
         const key=`${di}_${s.id}`;
-        const cells=(byWeek[w.n]||{})[key]||[];
+        const cells=[...((byWeek[w.n]||{})[key]||[])].sort((x,y)=>startKey(x,slots)-startKey(y,slots));
         if(cells.length===0){rows+=`<td class="empty"></td>`;return;}
-        const cell=cells[0];
-        const pal=PALETTE_MAP[courses.find(x=>x.id===cell.courseId)?.colorId]||PALETTE[0];
-        const instr=instructors.find(x=>x.id===cell.instructorId);
-        const room=rooms.find(x=>x.id===cell.roomId);
-        rows+=`<td class="session" style="background:${pal.bg};border-color:${pal.border}">
-          <div class="code" style="color:${pal.accent}">${cell.courseCode||""}</div>
-          <div class="name">${cell.courseName||""}</div>
-          ${instr?`<div class="meta">${instr.name}</div>`:""}
-          ${room?`<div class="meta">${room.name}</div>`:""}
-        </td>`;
+        const esc=v=>String(v??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+        const block=cell=>{
+          const pal=PALETTE_MAP[courses.find(x=>x.id===cell.courseId)?.colorId]||PALETTE[0];
+          const instr=instructors.find(x=>x.id===cell.instructorId);
+          const room=rooms.find(x=>x.id===cell.roomId);
+          return {pal,html:`
+          <div class="code" style="color:${pal.accent}">${esc(cell.courseCode)}</div>
+          ${customLabel(cell)?`<div class="meta">${esc(customLabel(cell))}</div>`:""}
+          <div class="name">${esc(cell.courseName)}</div>
+          ${instr?`<div class="meta">${esc(instr.name)}</div>`:""}
+          ${room?`<div class="meta">${esc(room.name)}</div>`:""}`};
+        };
+        if(cells.length===1){
+          const {pal,html}=block(cells[0]);
+          rows+=`<td class="session" style="background:${pal.bg};border-color:${pal.border}">${html}</td>`;
+        } else { // several sessions share this slot (custom times): list them in time order
+          rows+=`<td class="session multi">${cells.map(c=>{const {pal,html}=block(c);
+            return `<div class="sub" style="background:${pal.bg};border-color:${pal.border}">${html}</div>`;}).join("")}</td>`;
+        }
       });
     });
     rows+="</tr>";
@@ -812,6 +834,9 @@ function exportCohortHTML(state, groupId) {
     letter-spacing:0.06em;padding:8px 10px;border-radius:6px;}
   .day-header{background:#e2e8f0;font-weight:600;font-size:12px;text-align:center;color:#334155;}
   .slot-label{color:#94a3b8;font-size:11px;width:60px;}
+  .multi{background:#fff;padding:4px;}
+  .sub{border:1px solid;border-radius:6px;padding:4px 6px;margin-bottom:4px;text-align:left;}
+  .sub:last-child{margin-bottom:0;}
   .slot-time{background:#f1f5f9;font-size:10px;color:#64748b;text-align:center;
     font-family:'JetBrains Mono',monospace;}
   .date{font-size:9px;color:#94a3b8;font-family:'JetBrains Mono',monospace;}
@@ -855,7 +880,7 @@ function exportCohortCSV(state, groupId) {
     const instr=instructors.find(x=>x.id===a.instructorId)?.name||"";
     const room=rooms.find(x=>x.id===a.roomId)?.name||"";
     const grps=(a.groupIds||[]).map(g=>groups.find(x=>x.id===g)?.name).filter(Boolean).join("|");
-    const slotLabel=slots.find(s=>s.id===a.timeId)?.label||a.timeId;
+    const slotLabel=timeLabel(a,slots);
     rows.push([WEEKS.find(w=>w.n===a.weekNum)?.label||`W${a.weekNum}`,
       DAYS_FULL[a.dayIdx],a.timeId.toUpperCase(),slotLabel,
       a.courseCode||"",a.courseName||"",instr,room,grps]);
@@ -981,8 +1006,9 @@ function ScheduleTab({state,onApptClick,onCellClick,conflicts}) {
       if(!m[k]) m[k]=[];
       m[k].push(a);
     });
+    Object.values(m).forEach(list=>list.sort((x,y)=>startKey(x,slots)-startKey(y,slots)));
     return m;
-  },[filteredAppts]);
+  },[filteredAppts,slots]);
 
   return (
     <div style={{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden",minHeight:0}}>
@@ -1071,6 +1097,13 @@ function ScheduleTab({state,onApptClick,onCellClick,conflicts}) {
                               instructors={instructors} rooms={rooms}
                               onClick={onApptClick} conflicts={conflicts}/>
                           ))}
+                          {cells.length>0&&(
+                            <div title="Add another session in this slot (use Custom time to fit two)"
+                              onClick={e=>{e.stopPropagation();onCellClick(selWeek,di,slot.id);}}
+                              style={{textAlign:"center",fontSize:9,color:"var(--muted2)",opacity:0.55,padding:"2px 0",cursor:"pointer"}}>
+                              + add
+                            </div>
+                          )}
                           {cells.length===0&&(
                             <div style={{height:60,display:"flex",alignItems:"center",
                               justifyContent:"center",color:"var(--muted2)",fontSize:10,
@@ -2008,7 +2041,7 @@ function InstructorTab({state,onApptClick}) {
       const room=rooms.find(r=>r.id===a.roomId)?.name||"TBD";
       const grps=a.groupIds?.map(g=>groups.find(x=>x.id===g)?.name).filter(Boolean).join(", ")||"";
       rows.push([WEEKS.find(w=>w.n===a.weekNum)?.label||a.weekNum,DAYS_FULL[a.dayIdx],
-        slots.find(s=>s.id===a.timeId)?.label||a.timeId,a.courseName,a.courseCode,room,grps]);
+        timeLabel(a,slots),a.courseName,a.courseCode,room,grps]);
     });
     const csv=rows.map(r=>r.map(c=>`"${c}"`).join(",")).join("\n");
     const a=document.createElement("a");
@@ -2110,7 +2143,7 @@ function InstructorTab({state,onApptClick}) {
 //  CONFLICTS TAB
 // ═══════════════════════════════════════════════════════════════════
 function ConflictsTab({conflicts,state,onApptClick}) {
-  const {instructors,rooms,courses}=state;
+  const {instructors,rooms,courses,slots}=state;
   if(!conflicts.length) return (
     <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
       height:"100%",gap:12}}>
@@ -2141,7 +2174,7 @@ function ConflictsTab({conflicts,state,onApptClick}) {
           {items.map((c,i)=>{
             const weekLabel=WEEKS.find(w=>w.n===c.a.weekNum)?.label||`Week ${c.a.weekNum}`;
             const dayLabel=DAYS_FULL[c.a.dayIdx];
-            const slotLabel=c.a.timeId==="am"?"Morning":"Afternoon";
+            const slotLabel=slots.find(x=>x.id===c.a.timeId)?.short||c.a.timeId;
             return (
               <div key={i} style={{background:"var(--bg2)",border:`1px solid rgba(248,113,113,0.2)`,
                 borderRadius:"var(--r2)",padding:"10px 12px",marginBottom:8}}>
@@ -2159,6 +2192,7 @@ function ConflictsTab({conflicts,state,onApptClick}) {
                           {appt.courseCode}
                         </div>
                         <div style={{fontSize:11,color:pal.accent}}>{appt.courseName}</div>
+                        <div style={{fontSize:9,color:"var(--muted)",fontFamily:"var(--mono)",marginTop:2}}>{timeLabel(appt,slots)}</div>
                       </div>
                     );
                   })}
@@ -2332,36 +2366,15 @@ function SettingsTab({state,setState,toast}) {
 //  AUTO-SCHEDULE ENGINE
 // ═══════════════════════════════════════════════════════════════════
 
-// Returns true if a slot is free for an instructor on ALL specified weeks
-function isInstructorFreeAllWeeks(appointments, instructorId, dayIdx, timeId, weeks) {
-  return weeks.every(wn =>
-    !Object.values(appointments).some(a =>
-      a.weekNum===wn && a.dayIdx===dayIdx && a.timeId===timeId && a.instructorId===instructorId
-    )
-  );
-}
-
-// Returns true if ALL groupIds are free on ALL specified weeks
-function areGroupsFreeAllWeeks(appointments, groupIds, dayIdx, timeId, weeks) {
-  return weeks.every(wn =>
-    !Object.values(appointments).some(a =>
-      a.weekNum===wn && a.dayIdx===dayIdx && a.timeId===timeId &&
-      (a.groupIds||[]).some(g => (groupIds||[]).includes(g))
-    )
-  );
-}
-
-// Returns first available room matching optional type filter
-function findFreeRoom(appointments, rooms, dayIdx, timeId, weekNum, neededCapacity=0, preferType=null) {
+// Instructor / group / room availability checks live in ./conflicts.js and understand
+// custom session times. This picks the first free room matching the optional filters.
+function findFreeRoom(appointments, rooms, dayIdx, timeId, weekNum, neededCapacity=0, preferType=null, slots=[]) {
   const sorted=[...rooms].sort((a,b)=>{
     const typeScore=(r)=>preferType&&r.type===preferType?-1:0;
     return typeScore(a)-typeScore(b) || a.capacity-b.capacity;
   });
   return sorted.find(r =>
-    r.capacity>=neededCapacity &&
-    !Object.values(appointments).some(a =>
-      a.weekNum===weekNum && a.dayIdx===dayIdx && a.timeId===timeId && a.roomId===r.id
-    )
+    r.capacity>=neededCapacity && isRoomFree(appointments, r.id, weekNum, dayIdx, timeId, slots)
   );
 }
 
@@ -2372,7 +2385,7 @@ function findFreeRoom(appointments, rooms, dayIdx, timeId, weekNum, neededCapaci
  * Returns { scheduled: [appt], skipped: [{ job, reason }] }
  */
 function runAutoSchedule(state, jobs) {
-  const { appointments, courses, rooms, instructors } = state;
+  const { appointments, courses, rooms, instructors, slots } = state;
   const working = { ...appointments }; // mutable copy for conflict tracking within run
   const scheduled = [];
   const skipped = [];
@@ -2386,10 +2399,10 @@ function runAutoSchedule(state, jobs) {
     let placed = false;
     for (const { dayIdx, timeId } of preferredSlots) {
       // Check instructor free across ALL weeks
-      const instrFree = !instructorId || isInstructorFreeAllWeeks(working, instructorId, dayIdx, timeId, weeks);
+      const instrFree = !instructorId || isInstructorFreeAllWeeks(working, instructorId, dayIdx, timeId, weeks, slots);
       if (!instrFree) continue;
       // Check all groups free across ALL weeks
-      const grpFree = !(groupIds||[]).length || areGroupsFreeAllWeeks(working, groupIds, dayIdx, timeId, weeks);
+      const grpFree = !(groupIds||[]).length || areGroupsFreeAllWeeks(working, groupIds, dayIdx, timeId, weeks, slots);
       if (!grpFree) continue;
 
       // Find room for each week (may differ if roomId not locked)
@@ -2400,15 +2413,12 @@ function runAutoSchedule(state, jobs) {
         if (!rid) {
           // Estimate group size for capacity
           const grpSize = Math.max(neededCapacity || 0, 1);
-          const room = findFreeRoom(working, rooms, dayIdx, timeId, wn, grpSize, preferRoomType);
+          const room = findFreeRoom(working, rooms, dayIdx, timeId, wn, grpSize, preferRoomType, slots);
           if (!room) { roomOk = false; break; }
           rid = room.id;
         } else {
           // Check locked room is free
-          const roomBusy = Object.values(working).some(a =>
-            a.weekNum===wn && a.dayIdx===dayIdx && a.timeId===timeId && a.roomId===rid
-          );
-          if (roomBusy) { roomOk = false; break; }
+          if (!isRoomFree(working, rid, wn, dayIdx, timeId, slots)) { roomOk = false; break; }
         }
         const id = uid();
         const appt = { id, weekNum:wn, dayIdx, timeId, courseId, courseName:course.name,
@@ -2640,8 +2650,8 @@ function AutoScheduleTab({ state, setState, toast }) {
     const instr=instructors.find(i=>i.id===job.instructorId);
     const grps=job.groupIds||[];
     return slts.filter(({dayIdx,timeId})=>{
-      const instrOk=!instr||isInstructorFreeAllWeeks(appointments,instr.id,dayIdx,timeId,weeks);
-      const grpOk=!grps.length||areGroupsFreeAllWeeks(appointments,grps,dayIdx,timeId,weeks);
+      const instrOk=!instr||isInstructorFreeAllWeeks(appointments,instr.id,dayIdx,timeId,weeks,slots);
+      const grpOk=!grps.length||areGroupsFreeAllWeeks(appointments,grps,dayIdx,timeId,weeks,slots);
       return instrOk&&grpOk;
     }).length;
   }
@@ -2924,8 +2934,8 @@ function JobCard({ job, ji, courses, instructors, groups, rooms, slots, state, o
     const m={};
     DAYS.forEach((_,di)=>{
       slots.forEach(s=>{
-        const instrOk=!instr||isInstructorFreeAllWeeks(appointments,instr.id,di,s.id,weeks_);
-        const grpOk=!(job.groupIds||[]).length||areGroupsFreeAllWeeks(appointments,job.groupIds,di,s.id,weeks_);
+        const instrOk=!instr||isInstructorFreeAllWeeks(appointments,instr.id,di,s.id,weeks_,slots);
+        const grpOk=!(job.groupIds||[]).length||areGroupsFreeAllWeeks(appointments,job.groupIds,di,s.id,weeks_,slots);
         m[`${di}_${s.id}`]={instrOk,grpOk,free:instrOk&&grpOk};
       });
     });
@@ -3733,7 +3743,7 @@ export default function TimetableBuilder() {
     scheduleCloudSave(next);
   },[commit,collab.pushDiff,scheduleCloudSave]);
 
-  const conflicts=useMemo(()=>getAllConflicts(state.appointments||{}),[state.appointments]);
+  const conflicts=useMemo(()=>getAllConflicts(state.appointments||{},state.slots),[state.appointments,state.slots]);
 
   function log(action,detail="") {
     setState(prev=>({...prev,changelog:[...prev.changelog.slice(-199),{at:Date.now(),action,detail}]}),action,detail);

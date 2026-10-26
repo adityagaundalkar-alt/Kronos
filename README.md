@@ -6,7 +6,8 @@ A full-featured academic timetable scheduling app built with React + Vite.
 - Visual weekly schedule grid (Orientation + 16 weeks)
 - Auto-scheduler with instructor availability & conflict detection
 - Dashboard with load charts and session analytics
-- Collaborative rooms with live presence (Firebase-ready)
+- Collaborative rooms with live presence and per-item sync (Firebase)
+- Optional custom start/end times for a session inside a slot (e.g. 10:00–11:30 in a 09:00–12:00 slot); clashes are detected by real time overlap, back-to-back sessions are fine
 - Courses, instructors, rooms, student groups management
 - Export to CSV / JSON
 
@@ -94,6 +95,8 @@ kronos/
     ├── App.jsx         # Application UI
     ├── dates.js        # Timezone-safe date helpers
     ├── sync.js         # Per-item sync logic (pure, tested)
+    ├── timeslots.js    # Slot / custom-time parsing and overlap rules (pure, tested)
+    ├── conflicts.js    # Conflict engine (pure, tested)
     ├── roomClient.js   # Room collaboration core (tested with simulated clients)
     └── firebase.js     # Firebase setup, auth, rooms, presence
 tests/                  # npm test
