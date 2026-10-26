@@ -1,6 +1,6 @@
 // Shared constants and tiny helpers used across the app.
-export const DAYS      = ["Mon","Tue","Wed","Thu","Fri"];
-export const DAYS_FULL = ["Monday","Tuesday","Wednesday","Thursday","Friday"];
+export const DAYS      = ["Mon","Tue","Wed","Thu","Fri","Sat"]; // Saturday is shown only when something is scheduled on it
+export const DAYS_FULL = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
 export const WEEKS     = [
   { n:0,  label:"Orientation", short:"ORI" },
   ...Array.from({length:16},(_,i)=>({ n:i+1, label:`Week ${i+1}`, short:`W${i+1}` })),

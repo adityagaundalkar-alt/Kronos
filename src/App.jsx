@@ -350,7 +350,7 @@ function exportCohortHTML(state, groupId) {
     const ws=getWeekStart(week1Start,w.n);
     let hasContent=Object.keys(byWeek[w.n]||{}).length>0;
     if(!hasContent) return;
-    rows+=`<tr class="week-header"><td colspan="${1+DAYS.length*slots.length}">${w.label} &mdash; ${fmt(ws)} &ndash; ${fmt(addDays(ws,4))}</td></tr>
+    rows+=`<tr class="week-header"><td colspan="${1+DAYS.length*slots.length}">${w.label} &mdash; ${fmt(ws)} &ndash; ${fmt(addDays(ws,DAYS.length-1))}</td></tr>
 <tr>`;
     rows+=`<td class="slot-label"></td>`;
     DAYS.forEach((d,di)=>{
@@ -561,6 +561,7 @@ function ScheduleTab({state,onApptClick,onCellClick,conflicts}) {
   const [filterGroup,setFilterGroup]=useState("");
   const [selWeek,setSelWeek]=useState(1);
   const ws=getWeekStart(week1Start,selWeek);
+  const days=DAYS.slice(0,Object.values(appointments).some(x=>x.dayIdx>=5)?DAYS.length:5); // Saturday appears only when a session uses it
 
   const holidayOn=di=>{
     const d=iso(slotDate(week1Start,selWeek,di));
@@ -594,7 +595,7 @@ function ScheduleTab({state,onApptClick,onCellClick,conflicts}) {
           </select>
           <Btn variant="outline" icon label="Next week" onClick={()=>setSelWeek(v=>Math.min(16,v+1))}><Icon name="right" size={16}/></Btn>
         </div>
-        <span style={{fontSize:14,color:"var(--muted)",fontFamily:"var(--mono)"}}>{fmt(ws)} to {fmt(addDays(ws,4))}</span>
+        <span style={{fontSize:14,color:"var(--muted)",fontFamily:"var(--mono)"}}>{fmt(ws)} to {fmt(addDays(ws,days.length-1))}</span>
         <div style={{flex:1}}/>
         <select aria-label="Filter by student group" value={filterGroup} onChange={e=>setFilterGroup(e.target.value)} style={{width:150}}>
           <option value="">All groups</option>
@@ -610,7 +611,7 @@ function ScheduleTab({state,onApptClick,onCellClick,conflicts}) {
               <thead>
                 <tr>
                   <th className="period" style={{background:"var(--bg3)"}}><span className="sr-only">Period</span></th>
-                  {DAYS.map((d,di)=>{
+                  {days.map((d,di)=>{
                     const h=holidayOn(di);
                     return (
                       <th key={di} style={{color:h?"var(--warn)":undefined}}>
@@ -628,7 +629,7 @@ function ScheduleTab({state,onApptClick,onCellClick,conflicts}) {
                       <div className="period-name">{slot.short}</div>
                       <div className="period-time">{slot.label}</div>
                     </th>
-                    {DAYS.map((_,di)=>{
+                    {days.map((_,di)=>{
                       const h=holidayOn(di), cells=apptMap[`${di}_${slot.id}`]||[];
                       if(h) return <td key={di} className="cell holiday" style={{textAlign:"center",color:"var(--warn)",fontSize:14}}>{cells.length?cells.map(chip):"Holiday"}</td>;
                       return (
@@ -646,7 +647,7 @@ function ScheduleTab({state,onApptClick,onCellClick,conflicts}) {
           </div>
         ):(
           <div className="agenda">
-            {DAYS.map((d,di)=>{
+            {days.map((d,di)=>{
               const h=holidayOn(di);
               return (
                 <section key={di} aria-label={DAYS_FULL[di]} style={{background:"var(--bg2)",border:"1px solid var(--border2)",borderRadius:"var(--r2)",overflow:"hidden"}}>
@@ -1584,6 +1585,7 @@ function InstructorTab({state,onApptClick}) {
   const [selInstructor,setSelInstructor]=useState(instructors[0]?.id||"");
   const [selWeek,setSelWeek]=useState(1);
   const instr=instructors.find(x=>x.id===selInstructor);
+  const days=DAYS.slice(0,Object.values(appointments).some(x=>x.dayIdx>=5)?DAYS.length:5);
 
   const myAppts=Object.values(appointments).filter(a=>a.instructorId===selInstructor&&a.weekNum===selWeek);
   const apptMap={};
@@ -1652,7 +1654,7 @@ function InstructorTab({state,onApptClick}) {
             <tr>
               <th style={{width:80,textAlign:"left",padding:"6px 8px",fontSize:11.5,color:"var(--muted)",
                 textTransform:"uppercase",letterSpacing:"0.08em",fontWeight:600}}>Slot</th>
-              {DAYS.map((d,di)=>(
+              {days.map((d,di)=>(
                 <th key={di} style={{textAlign:"left",padding:"6px 8px",fontSize:12.5,fontWeight:500}}>
                   <div>{d}</div>
                   <div style={{fontSize:11,color:"var(--muted)",fontFamily:"var(--mono)",fontWeight:400}}>
@@ -1669,7 +1671,7 @@ function InstructorTab({state,onApptClick}) {
                   <div style={{fontSize:11.5,fontWeight:600,color:"var(--accent)",fontFamily:"var(--mono)"}}>{slot.short.toUpperCase()}</div>
                   <div style={{fontSize:11,color:"var(--muted2)"}}>{slot.label}</div>
                 </td>
-                {DAYS.map((_,di)=>{
+                {days.map((_,di)=>{
                   const cells=(apptMap[`${di}_${slot.id}`])||[];
                   return (
                     <td key={di} style={{verticalAlign:"top",background:"var(--bg2)",
@@ -1820,6 +1822,7 @@ function SettingsTab({state,setState,toast}) {
     setState(s=>({...s,holidays:s.holidays.filter(h=>h.id!==id)}));
   }
 
+  const importRef=useRef(null);
   function exportData() {
     const blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});
     const a=document.createElement("a");
@@ -1829,12 +1832,14 @@ function SettingsTab({state,setState,toast}) {
   }
   function importData(e) {
     const file=e.target.files[0];
+    e.target.value=""; // so choosing the same file again still fires
     if(!file) return;
     const reader=new FileReader();
     reader.onload=ev=>{
       try {
-        const data=JSON.parse(ev.target.result);
-        setState(data);
+        const data=sanitizeState(JSON.parse(ev.target.result));
+        if(!data||typeof data!=="object") throw new Error("bad file");
+        setState({...data,settings:{...data.settings,semester:state.settings.semester||data.settings?.semester||""}}); // the term keeps its own name
         toast("Data imported successfully","ok");
       } catch { toast("Invalid file format","error"); }
     };
@@ -1906,11 +1911,9 @@ function SettingsTab({state,setState,toast}) {
           letterSpacing:"0.08em",marginBottom:12}}>Data Management</div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
           <Btn variant="outline" onClick={exportData}><Icon name="download" size={15}/> Export JSON</Btn>
-          <label style={{cursor:"pointer"}}>
-            <Btn variant="outline" as="span">Import JSON</Btn>
-            <input type="file" accept=".json" onChange={importData} style={{display:"none"}}/>
-          </label>
-          <Btn variant="danger" onClick={resetData}>⟳ Reset to Defaults</Btn>
+          <Btn variant="outline" onClick={()=>importRef.current?.click()}>Import JSON</Btn>
+          <input ref={importRef} type="file" accept=".json,application/json" aria-label="Import JSON file" onChange={importData} style={{display:"none"}}/>
+          <Btn variant="danger" onClick={resetData}>Clear this term</Btn>
         </div>
       </div>
     </div>
