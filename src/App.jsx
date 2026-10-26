@@ -7,7 +7,10 @@ import { slotRange, customLabel, timeLabel, startKey, validateCustomTimes, fromM
 import { DAYS, DAYS_FULL, WEEKS, PALETTE, ROOM_TYPES, CATEGORIES, uid, initials, getPalette, paletteById } from "./constants.js";
 import { emptyState, termFrom, sanitizeState, loadLocal, saveLocal, backupLocalState, loadRecentRooms, forgetRoom } from "./state.js";
 import { PresenceCtx, CollabCtx } from "./collab/context.js";
-import { Badge, Btn, Modal, Field, MultiSelect, EmptyState, Segmented, Avatar, useMedia, useTheme, useToasts, Toasts } from "./ui/kit.jsx";
+import { askConfirm, ConfirmProvider } from "./ui/Confirm.jsx";
+import { changesBetween, applyChanges, invert, MAX_HISTORY } from "./history.js";
+import GroupPicker from "./ui/GroupPicker.jsx";
+import { Badge, Btn, Modal, Field, EmptyState, Segmented, Avatar, useMedia, useTheme, useToasts, Toasts } from "./ui/kit.jsx";
 import Icon from "./ui/Icon.jsx";
 import AvailabilityGrid from "./features/AvailabilityGrid.jsx";
 import { CommentsPanel, CommentsTab } from "./features/Comments.jsx";
@@ -31,6 +34,9 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
     return {weekNum:w,dayIdx:d,timeId:t,courseId:"",instructorId:"",roomId:"",groupIds:[],section:"",notes:""};
   });
   const [scheduleAll,setScheduleAll]=useState(false);
+  // "Other event": extra classes, workshops, exams - anything that is not one of the term's courses.
+  const [other,setOther]=useState(()=>!!(isEdit&&!appt.courseId&&appt.courseName));
+  const hasWhat=!!form.courseId||(other&&!!(form.courseName||"").trim());
   const [confirmDelete,setConfirmDelete]=useState(false);
   const [overrides,setOverrides]=useState(()=>({instructor:false,room:false,group:false,...Object.fromEntries((isEdit&&Array.isArray(appt.overrides)?appt.overrides:[]).map(t=>[t,true]))}));
 
@@ -74,12 +80,13 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
   const blockingConflicts=conflicts.filter(c=>!overrides[c.type]);
 
   function handleSave() {
-    if(!form.courseId||form.weekNum===undefined) return;
+    if(!hasWhat||form.weekNum===undefined) return;
     if(deletedRemotely) return; // someone else deleted it - saving would silently resurrect it
     if(blockingConflicts.length) return;
     const course=courses.find(x=>x.id===form.courseId);
     if(!timesCheck.ok) return;
-    const base={...effective,courseName:course?.name,courseCode:course?.code,section:form.section||""};
+    const base={...effective,courseName:other?(form.courseName||"").trim():course?.name,courseCode:other?((form.courseCode||"").trim()||"EXTRA"):course?.code,section:form.section||""};
+    if(other) base.courseId="";
     // Remember which clashes were knowingly overridden, so they show as resolved (but still tracked) in Conflicts.
     const kept=[...new Set(conflicts.map(c=>c.type))].filter(t=>overrides[t]);
     if(kept.length) base.overrides=kept; else delete base.overrides;
@@ -122,11 +129,26 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
         <fieldset disabled={readOnly} style={{border:0,padding:0,margin:0,minWidth:0}}>
         {/* Course */}
         <Field label="Course" required>
-          <select value={form.courseId} onChange={e=>setForm(f=>({...f,courseId:e.target.value,instructorId:"",groupIds:[]}))}>
+          <select value={other?"__other":form.courseId} onChange={e=>{
+            const v=e.target.value;
+            if(v==="__other"){setOther(true);setForm(f=>({...f,courseId:"",instructorId:"",groupIds:[]}));}
+            else{setOther(false);setForm(f=>{const n={...f,courseId:v,instructorId:"",groupIds:[]};delete n.courseName;delete n.courseCode;return n;});}
+          }}>
             <option value="">— Select course —</option>
             {courses.map(c=><option key={c.id} value={c.id}>[{c.code}] {c.name}</option>)}
+            <option value="__other">Other event (extra class, workshop, exam…)</option>
           </select>
         </Field>
+        {other&&(
+          <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:8}}>
+            <Field label="Event title" required>
+              <input value={form.courseName||""} onChange={e=>setForm(f=>({...f,courseName:e.target.value}))} placeholder="e.g. Extra class: Machine Learning"/>
+            </Field>
+            <Field label="Short code" hint="Optional">
+              <input value={form.courseCode||""} onChange={e=>setForm(f=>({...f,courseCode:e.target.value}))} placeholder="EXTRA" maxLength={12}/>
+            </Field>
+          </div>
+        )}
         {pal&&(
           <div style={{marginBottom:12,padding:"8px 10px",borderRadius:"var(--r)",
             background:pal.bg,border:`1px solid ${pal.border}`,
@@ -205,12 +227,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
 
         {/* Groups */}
         <Field label="Student Groups">
-          <MultiSelect
-            options={groups.map(g=>({value:g.id,label:g.name}))}
-            value={form.groupIds}
-            onChange={v=>setForm(f=>({...f,groupIds:v}))}
-            placeholder="Select groups..."
-          />
+          <GroupPicker groups={groups} value={form.groupIds} onChange={v=>setForm(f=>({...f,groupIds:v}))} placeholder="Select groups..."/>
         </Field>
 
         {/* Section + Notes */}
@@ -277,7 +294,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
           <div style={{display:"flex",gap:8}}>
             <Btn variant="outline" onClick={onClose}>{readOnly?"Close":"Cancel"}</Btn>
             {!readOnly&&<Btn variant="primary" onClick={handleSave}
-              disabled={!form.courseId||blockingConflicts.length>0||!timesCheck.ok||deletedRemotely}
+              disabled={!hasWhat||blockingConflicts.length>0||!timesCheck.ok||deletedRemotely}
               style={{minWidth:90}}>
               {isEdit?"Update":"Schedule"}
             </Btn>}
@@ -1143,9 +1160,12 @@ function CoursesTab({state,setState,toast}) {
     }
     setEditing(null);
   }
-  function remove(id) {
-    setState(s=>({...s,courses:s.courses.filter(c=>c.id!==id)}));
-    toast("Course removed","warn");
+  async function remove(id) {
+    const c=state.courses.find(x=>x.id===id);
+    const used=Object.values(state.appointments||{}).filter(a=>a&&a.courseId===id).length;
+    if(!await askConfirm({title:"Delete this course?",message:`${c?`${c.code} ${c.name}`:"This course"} will be removed from the term.`,detail:used?`${used} scheduled session${used===1?"":"s"} use it and will stay on the timetable.`:null,confirmLabel:"Delete course"})) return;
+    setState(s=>({...s,courses:s.courses.filter(c=>c.id!==id)}),"deleted course",c?.name);
+    toast("Course removed. You can undo it.","warn");
     setEditing(null);
   }
 
@@ -1252,11 +1272,7 @@ function CourseEditor({form,setForm,instructors,groups,onSave,onDelete,onClose})
         </Field>
       </div>
       <Field label="Default Student Groups" hint="Pre-selected when scheduling this course">
-        <MultiSelect
-          options={groups.map(g=>({value:g.id,label:g.name}))}
-          value={form.defaultGroupIds}
-          onChange={v=>set("defaultGroupIds",v)}
-          placeholder="Select default groups..."/>
+        <GroupPicker groups={groups} value={form.defaultGroupIds} onChange={v=>set("defaultGroupIds",v)} placeholder="Select default groups..."/>
       </Field>
       <Field label="Color">
         <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:4}}>
@@ -1317,9 +1333,12 @@ function InstructorsPanel({state,setState,toast}) {
     }
     setEditing(null);
   }
-  function remove(id) {
-    setState(s=>({...s,instructors:s.instructors.filter(i=>i.id!==id)}));
-    toast("Instructor removed","warn");
+  async function remove(id) {
+    const i=state.instructors.find(x=>x.id===id);
+    const used=Object.values(state.appointments||{}).filter(a=>a&&a.instructorId===id).length;
+    if(!await askConfirm({title:"Delete this instructor?",message:`${i?.name||"This instructor"} will be removed from the term.`,detail:used?`${used} scheduled session${used===1?"":"s"} still name them.`:null,confirmLabel:"Delete instructor"})) return;
+    setState(s=>({...s,instructors:s.instructors.filter(i=>i.id!==id)}),"deleted instructor",i?.name);
+    toast("Instructor removed. You can undo it.","warn");
     setEditing(null);
   }
 
@@ -1433,9 +1452,12 @@ function RoomsPanel({state,setState,toast}) {
     }
     setEditing(null);
   }
-  function remove(id) {
-    setState(s=>({...s,rooms:s.rooms.filter(r=>r.id!==id)}));
-    toast("Room removed","warn");
+  async function remove(id) {
+    const rm=state.rooms.find(x=>x.id===id);
+    const used=Object.values(state.appointments||{}).filter(a=>a&&a.roomId===id).length;
+    if(!await askConfirm({title:"Delete this room?",message:`${rm?.name||"This room"} will be removed from the term.`,detail:used?`${used} scheduled session${used===1?"":"s"} use it.`:null,confirmLabel:"Delete room"})) return;
+    setState(s=>({...s,rooms:s.rooms.filter(r=>r.id!==id)}),"deleted room",rm?.name);
+    toast("Room removed. You can undo it.","warn");
     setEditing(null);
   }
 
@@ -1515,9 +1537,12 @@ function GroupsPanel({state,setState,toast}) {
     }
     setEditing(null);
   }
-  function remove(id) {
-    setState(s=>({...s,groups:s.groups.filter(g=>g.id!==id&&g.parentId!==id)}));
-    toast("Group removed","warn");
+  async function remove(id) {
+    const g=state.groups.find(x=>x.id===id);
+    const kids=state.groups.filter(x=>x.parentId===id).length;
+    if(!await askConfirm({title:"Delete this group?",message:`${g?.name||"This group"} will be removed from the term.`,detail:kids?`Its ${kids} child group${kids===1?"":"s"} will be removed too.`:null,confirmLabel:"Delete group"})) return;
+    setState(s=>({...s,groups:s.groups.filter(g=>g.id!==id&&g.parentId!==id)}),"deleted group",g?.name);
+    toast("Group removed. You can undo it.","warn");
     setEditing(null);
   }
 
@@ -1835,8 +1860,10 @@ function SettingsTab({state,setState,toast}) {
   function updateHoliday(id,key,val) {
     setState(s=>({...s,holidays:s.holidays.map(h=>h.id===id?{...h,[key]:val}:h)}));
   }
-  function removeHoliday(id) {
-    setState(s=>({...s,holidays:s.holidays.filter(h=>h.id!==id)}));
+  async function removeHoliday(id) {
+    const h=state.holidays.find(x=>x.id===id);
+    if(!await askConfirm({title:"Remove this holiday?",message:`${h?.name||"This holiday"} will be removed, and its date becomes a normal teaching day.`,confirmLabel:"Remove holiday"})) return;
+    setState(s=>({...s,holidays:s.holidays.filter(h=>h.id!==id)}),"removed holiday",h?.name);
   }
 
   const importRef=useRef(null);
@@ -1852,20 +1879,23 @@ function SettingsTab({state,setState,toast}) {
     e.target.value=""; // so choosing the same file again still fires
     if(!file) return;
     const reader=new FileReader();
-    reader.onload=ev=>{
+    reader.onload=async ev=>{
       try {
         const data=sanitizeState(JSON.parse(ev.target.result));
         if(!data||typeof data!=="object") throw new Error("bad file");
+        const have=Object.keys(state.appointments||{}).length+state.courses.length;
+        if(have&&!await askConfirm({title:"Replace this term's data?",message:"Importing replaces everything in this term with the contents of the file.",detail:`Now: ${Object.keys(state.appointments||{}).length} sessions and ${state.courses.length} courses. In the file: ${Object.keys(data.appointments||{}).length} sessions and ${(data.courses||[]).length} courses. You can undo it afterwards.`,confirmLabel:"Replace data"})) return;
         setState({...data,settings:{...data.settings,semester:state.settings.semester||data.settings?.semester||""}}); // the term keeps its own name
-        toast("Data imported successfully","ok");
+        toast("Data imported successfully. You can undo it.","ok");
       } catch { toast("Invalid file format","error"); }
     };
     reader.readAsText(file);
   }
-  function resetData() {
-    if(confirm("Clear everything in this term (courses, instructors, rooms, groups and sessions)? This cannot be undone.")) {
-      setState(emptyState(state.settings.semester));
-      toast("Term cleared","warn");
+  async function resetData() {
+    const n=Object.keys(state.appointments||{}).length;
+    if(await askConfirm({title:"Clear this whole term?",message:"Courses, instructors, rooms, groups, holidays and all sessions will be removed.",detail:`${n} session${n===1?"":"s"} will be deleted. You can undo this right after, while this page stays open.`,confirmLabel:"Clear term"})) {
+      setState(emptyState(state.settings.semester),"cleared term");
+      toast("Term cleared. You can undo it.","warn");
     }
   }
 
@@ -1961,7 +1991,8 @@ const writeName = n => { try { localStorage.setItem("kronos_user", n); } catch {
 // ═══════════════════════════════════════════════════════════════════
 //  ROOT
 // ═══════════════════════════════════════════════════════════════════
-export default function TimetableBuilder() {
+export default function TimetableBuilder() { return <ConfirmProvider><Builder /></ConfirmProvider>; }
+function Builder() {
   const { user, authUid, loading: authLoading } = useAuth();
   const theme = useTheme();
   const [joinLinkCode] = useState(() => codeFromSearch(typeof window !== "undefined" ? window.location.search : ""));
@@ -2006,6 +2037,10 @@ export default function TimetableBuilder() {
   canEditRef.current = canEdit;
   const collabRef = useRef(null);
   collabRef.current = session;
+  const undoStack = useRef([]), redoStack = useRef([]);
+  const [, setHistoryTick] = useState(0);
+  const termKey = session?.roomCode || "";
+  useEffect(() => { undoStack.current = []; redoStack.current = []; setHistoryTick(t => t + 1); }, [termKey]);
   const setState = useCallback((updater, opType, opDetail) => {
     if (!canEditRef.current) { toast.push(collabRef.current?.archived ? "This term is archived, so it can't be changed. An admin can reopen it." : "You have view-only access to this term.", "info"); return; }
     const prev = stateRef.current;
@@ -2013,7 +2048,47 @@ export default function TimetableBuilder() {
     if (next === prev) return;
     commit(next);
     collab.pushDiff(prev, next, opType, opDetail);
+    const changes = changesBetween(prev, next);
+    if (changes.length) {
+      undoStack.current = [...undoStack.current, { changes, label: opType || "change" }].slice(-MAX_HISTORY);
+      redoStack.current = [];
+      setHistoryTick(t => t + 1);
+    }
   }, [commit, collab.pushDiff, toast.push]);
+
+  // Undo / redo: your own changes only, newest first. Items a teammate has touched since are left alone.
+  const stepHistory = useCallback(dir => {
+    if (!canEditRef.current) return;
+    const from = dir === "undo" ? undoStack : redoStack, to = dir === "undo" ? redoStack : undoStack;
+    const entry = from.current[from.current.length - 1];
+    if (!entry) return;
+    const prev = stateRef.current;
+    const res = applyChanges(prev, invert(entry.changes));
+    from.current = from.current.slice(0, -1);
+    if (res.applied) {
+      to.current = [...to.current, { changes: invert(entry.changes), label: entry.label }].slice(-MAX_HISTORY);
+      commit(res.state);
+      collab.pushDiff(prev, res.state, dir, entry.label);
+    }
+    setHistoryTick(t => t + 1);
+    const verb = dir === "undo" ? "Undid" : "Redid";
+    if (!res.applied) toast.push("Couldn't " + dir + ": a teammate has changed those items since", "warn");
+    else if (res.skipped) toast.push(`${verb} ${entry.label}, except ${res.skipped} item${res.skipped === 1 ? "" : "s"} a teammate changed since`, "warn");
+    else toast.push(`${verb}: ${entry.label}`, "ok");
+  }, [commit, collab.pushDiff, toast.push]);
+  const canUndo = canEdit && undoStack.current.length > 0, canRedo = canEdit && redoStack.current.length > 0;
+  useEffect(() => {
+    const onKey = e => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      const t = e.target, typing = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable);
+      if (typing) return;
+      const k = e.key.toLowerCase();
+      if (k === "z" && !e.shiftKey) { e.preventDefault(); stepHistory("undo"); }
+      else if ((k === "z" && e.shiftKey) || k === "y") { e.preventDefault(); stepHistory("redo"); }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [stepHistory]);
 
   const conflicts = useMemo(() => getAllConflicts(state.appointments || {}, state.slots), [state.appointments, state.slots]);
   const openConflicts = useMemo(() => conflicts.filter(c => !c.overridden), [conflicts]);
@@ -2110,7 +2185,8 @@ export default function TimetableBuilder() {
     }
     setOpeningCode("");
   }
-  function handleForgetTerm(term) {
+  async function handleForgetTerm(term) {
+    if (!await askConfirm({ title: "Remove this term from your list?", message: `${term.name || "This term"} stays available to everyone else, and you can join it again with its code.`, confirmLabel: "Remove from list" })) return;
     forgetRoom(term.code);
     if (user) removeMyTerm(user.uid, term.code).catch(() => {});
     setTermList(l => l.filter(t => t.code !== term.code));
@@ -2190,6 +2266,12 @@ export default function TimetableBuilder() {
                 <button type="button" className="pill bad" onClick={() => setTab("conflicts")}>
                   <span className="dot pulse" />{conflictCount} conflict{conflictCount !== 1 ? "s" : ""}
                 </button>
+              )}
+              {canEdit && (
+                <div role="group" aria-label="History" style={{ display: "inline-flex", gap: 4 }}>
+                  <Btn variant="outline" size="md" onClick={() => stepHistory("undo")} disabled={!canUndo} title={canUndo ? `Undo ${undoStack.current[undoStack.current.length - 1].label} (Ctrl+Z)` : "Nothing to undo"} label="Undo"><Icon name="undo" size={16} /></Btn>
+                  <Btn variant="outline" size="md" onClick={() => stepHistory("redo")} disabled={!canRedo} title={canRedo ? `Redo ${redoStack.current[redoStack.current.length - 1].label} (Ctrl+Shift+Z)` : "Nothing to redo"} label="Redo"><Icon name="redo" size={16} /></Btn>
+                </div>
               )}
               {!session && <Btn variant="outline" size="md" onClick={() => setLocalMode(false)}><Icon name="people" size={16} /> <span className="hide-sm">Open a term</span></Btn>}
               {canEdit && <Btn variant="primary" size="md" onClick={() => setModal({ weekNum: 1, dayIdx: 0, timeId: state.slots[0]?.id })}><Icon name="plus" size={16} /> Schedule</Btn>}

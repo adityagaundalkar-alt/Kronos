@@ -278,7 +278,7 @@ function commitSession(ctx, week, dayIdx, timeId, freeRooms, lastRoomId, makeId,
   const room = pickRoom(ctx, freeRooms, lastRoomId);
   const appt = {
     id: makeId(), weekNum: week, dayIdx, timeId,
-    courseId: job.courseId, courseName: course.name, courseCode: course.code,
+    courseId: job.custom ? "" : job.courseId, courseName: course.name, courseCode: course.code,
     instructorId: job.instructorId || "", roomId: room.id,
     groupIds: [...(job.groupIds || [])], notes: "",
   };
@@ -297,7 +297,8 @@ export function runAutoSchedule(state, jobs, { makeId = randomId } = {}) {
   const scheduled = [], removed = [], reports = [], skipped = [];
 
   for (const job of jobs) {
-    const course = (state.courses || []).find(c => c.id === job.courseId);
+    // A custom event (extra class, workshop...) has no course: it carries its own title.
+    const course = job.custom ? { id: "", name: (job.customTitle || "").trim() || "Extra session", code: (job.customCode || "").trim() || "EXTRA" } : (state.courses || []).find(c => c.id === job.courseId);
     const report = { job, course, status: "none", placed: [], missing: [], holidayWeeks: 0, removed: [], explanation: [], suggestions: [] };
     reports.push(report);
     if (!course) { report.explanation = ["Course not found."]; skipped.push({ job, reason: "Course not found" }); continue; }
@@ -312,7 +313,7 @@ export function runAutoSchedule(state, jobs, { makeId = randomId } = {}) {
     // Replace mode: lift this course's unlocked sessions out of the way first (restored per week if nothing replaces them).
     const lifted = [];
     if (job.replaceExisting) {
-      Object.values(state.appointments || {}).filter(a => a && a.courseId === job.courseId && !a.locked && weeks.includes(a.weekNum))
+      Object.values(state.appointments || {}).filter(a => a && (job.custom ? (!a.courseId && a.courseName === course.name) : a.courseId === job.courseId) && !a.locked && weeks.includes(a.weekNum))
         .forEach(a => { lifted.push(a); index.remove(a); });
     }
 

@@ -17,6 +17,8 @@ const P = {
   close: "M6 6l12 12M18 6L6 18",
   check: "M5 12.5l4.5 4.5L19 7.5",
   left: "M15 5l-7 7 7 7",
+  undo: "M9 14L4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3",
+  redo: "M15 14l5-5-5-5M20 9H10a6 6 0 0 0 0 12h3",
   right: "M9 5l7 7-7 7",
   down: "M6 9l6 6 6-6",
   up: "M6 15l6-6 6 6",
