@@ -32,7 +32,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
   });
   const [scheduleAll,setScheduleAll]=useState(false);
   const [confirmDelete,setConfirmDelete]=useState(false);
-  const [overrides,setOverrides]=useState({instructor:false,room:false,group:false});
+  const [overrides,setOverrides]=useState(()=>({instructor:false,room:false,group:false,...Object.fromEntries((isEdit&&Array.isArray(appt.overrides)?appt.overrides:[]).map(t=>[t,true]))}));
 
   // Collaboration awareness: who else has this session open, and did it change underneath us?
   const {editing}=useContext(PresenceCtx);
@@ -80,6 +80,9 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
     const course=courses.find(x=>x.id===form.courseId);
     if(!timesCheck.ok) return;
     const base={...effective,courseName:course?.name,courseCode:course?.code,section:form.section||""};
+    // Remember which clashes were knowingly overridden, so they show as resolved (but still tracked) in Conflicts.
+    const kept=[...new Set(conflicts.map(c=>c.type))].filter(t=>overrides[t]);
+    if(kept.length) base.overrides=kept; else delete base.overrides;
     const toSave=[];
     if(scheduleAll&&!isEdit) {
       WEEKS.filter(w=>w.n>0).forEach(w=>{
@@ -718,6 +721,7 @@ function DashboardTab({state,conflicts}) {
       {sub&&<div style={{fontSize:11.5,color:"var(--muted)",marginTop:4}}>{sub}</div>}
     </div>
   );
+
 
   return (
     <div style={{padding:16,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",height:"100%"}}>
@@ -1703,7 +1707,7 @@ function ConflictsTab({conflicts,state,onApptClick}) {
   const {instructors,rooms,courses,slots}=state;
   if(!conflicts.length) return (
     <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
-      height:"100%",gap:12}}>
+      flex:1,minHeight:0,gap:12}}>
       <div style={{color:"var(--accent)"}}><Icon name="check" size={32}/></div>
       <div style={{fontSize:14,fontWeight:600,color:"var(--accent)"}}>No conflicts detected</div>
       <div style={{fontSize:12.5,color:"var(--muted)"}}>Your schedule is clean and conflict-free</div>
@@ -1711,32 +1715,21 @@ function ConflictsTab({conflicts,state,onApptClick}) {
   );
 
   const grouped={instructor:[],room:[],group:[]};
-  conflicts.forEach(c=>{ if(grouped[c.type]) grouped[c.type].push(c); });
+  const open=conflicts.filter(c=>!c.overridden), resolved=conflicts.filter(c=>c.overridden);
+  open.forEach(c=>{ if(grouped[c.type]) grouped[c.type].push(c); });
   const typeLabel={instructor:"Instructor Conflicts",room:"Room Conflicts",group:"Group Conflicts"};
   const typeColor={instructor:"var(--danger)",room:"var(--warn)",group:"var(--accent2)"};
 
-  return (
-    <div style={{padding:16,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",height:"100%"}}>
-      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}>
-        <div style={{fontSize:14,fontWeight:700}}>Conflict Report</div>
-        <Badge color="red">{conflicts.length} issue{conflicts.length!==1?"s":""}</Badge>
-      </div>
-      {Object.entries(grouped).filter(([,v])=>v.length).map(([type,items])=>(
-        <div key={type} style={{marginBottom:16}}>
-          <div style={{fontSize:11.5,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.1em",
-            color:typeColor[type]||"var(--muted)",marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
-            <span style={{width:6,height:6,borderRadius:"50%",background:typeColor[type],display:"inline-block"}}/>
-            {typeLabel[type]} ({items.length})
-          </div>
-          {items.map((c,i)=>{
+  const renderCard=(c,i)=>{
             const weekLabel=WEEKS.find(w=>w.n===c.a.weekNum)?.label||`Week ${c.a.weekNum}`;
             const dayLabel=DAYS_FULL[c.a.dayIdx];
             const slotLabel=slots.find(x=>x.id===c.a.timeId)?.short||c.a.timeId;
             return (
-              <div key={i} style={{background:"var(--bg2)",border:"1px solid var(--danger-line)",
+              <div key={i} style={{background:"var(--bg2)",border:`1px solid ${c.overridden?"var(--border2)":"var(--danger-line)"}`,opacity:c.overridden?.85:1,
                 borderRadius:"var(--r2)",padding:"10px 12px",marginBottom:8}}>
                 <div style={{fontSize:11.5,color:"var(--muted)",marginBottom:6,fontFamily:"var(--mono)"}}>
                   {weekLabel} · {dayLabel} · {slotLabel}
+                  {c.overridden&&<span style={{marginLeft:8,color:"var(--accent)",fontWeight:700}}>✓ Overridden · {typeLabel[c.type].replace(" Conflicts","").toLowerCase()} clash accepted</span>}
                 </div>
                 <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
                   {[c.a,c.b].map((appt,j)=>{
@@ -1756,9 +1749,33 @@ function ConflictsTab({conflicts,state,onApptClick}) {
                 </div>
               </div>
             );
-          })}
+          };
+
+  return (
+    <div style={{padding:16,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",height:"100%"}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}>
+        <div style={{fontSize:14,fontWeight:700}}>Conflict Report</div>
+        {open.length>0?<Badge color="red">{open.length} unresolved</Badge>:<Badge color="green">All resolved</Badge>}
+        {resolved.length>0&&<Badge color="muted">{resolved.length} overridden</Badge>}
+      </div>
+      {Object.entries(grouped).filter(([,v])=>v.length).map(([type,items])=>(
+        <div key={type} style={{marginBottom:16}}>
+          <div style={{fontSize:11.5,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.1em",
+            color:typeColor[type]||"var(--muted)",marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
+            <span style={{width:6,height:6,borderRadius:"50%",background:typeColor[type],display:"inline-block"}}/>
+            {typeLabel[type]} ({items.length})
+          </div>
+          {items.map(renderCard)}
         </div>
       ))}
+      {resolved.length>0&&(
+        <div style={{marginBottom:16}}>
+          <div style={{fontSize:11.5,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.1em",color:"var(--accent)",marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
+            <Icon name="check" size={14}/>Resolved by override ({resolved.length})
+          </div>
+          {resolved.map(renderCard)}
+        </div>
+      )}
     </div>
   );
 }
@@ -1999,6 +2016,7 @@ export default function TimetableBuilder() {
   }, [commit, collab.pushDiff, toast.push]);
 
   const conflicts = useMemo(() => getAllConflicts(state.appointments || {}, state.slots), [state.appointments, state.slots]);
+  const openConflicts = useMemo(() => conflicts.filter(c => !c.overridden), [conflicts]);
 
   // Signing in or out changes our database identity; room access is tied to it, so join again with the same code.
   const lastUid = useRef(null);
@@ -2147,7 +2165,7 @@ export default function TimetableBuilder() {
     </>
   );
 
-  const conflictCount = conflicts.length;
+  const conflictCount = openConflicts.length;
   const openComments = Object.values(collab.comments.open || {}).reduce((a, b) => a + b, 0);
   const counts = { conflicts: conflictCount, comments: openComments };
   const current = VIEWS.find(v => v.id === tab) || VIEWS[0];
@@ -2182,14 +2200,14 @@ export default function TimetableBuilder() {
               onShare={() => setShowShare(true)} onLeave={handleSwitchTerm} />
           )}
           <main className="view" id="main">
-            {tab === "schedule" && <ScheduleTab state={state} onApptClick={handleApptClick} onCellClick={handleCellClick} conflicts={conflicts} />}
-            {tab === "dashboard" && <DashboardTab state={state} conflicts={conflicts} />}
+            {tab === "schedule" && <ScheduleTab state={state} onApptClick={handleApptClick} onCellClick={handleCellClick} conflicts={openConflicts} />}
+            {tab === "dashboard" && <DashboardTab state={state} conflicts={openConflicts} />}
             {tab === "autoschedule" && canEdit && <AutoScheduleTab state={state} setState={setState} toast={toast.push} />}
             {tab === "courses" && canEdit && <CoursesTab state={state} setState={setState} toast={toast.push} />}
             {tab === "assets" && canEdit && <AssetsTab state={state} setState={setState} toast={toast.push} />}
             {tab === "instructor" && <InstructorTab state={state} onApptClick={handleApptClick} />}
             {tab === "conflicts" && <ConflictsTab conflicts={conflicts} state={state} onApptClick={handleApptClick} />}
-            {tab === "comments" && session && <CommentsTab state={state} onOpenAppt={id => { const a = state.appointments[id]; if (a) setModal({ appt: a }); }} />}
+            {tab === "comments" && session && <CommentsTab state={state} onOpenAppt={ref => { const id = typeof ref === "string" ? ref : ref?.id; const a = (id && state.appointments[id]) || (typeof ref === "object" ? ref : null); if (a) setModal({ appt: a }); else toast.push("That session no longer exists", "warn"); }} />}
             {tab === "changelog" && canEdit && <ChangelogTab log={state.changelog} />}
             {tab === "settings" && canEdit && <SettingsTab state={state} setState={setState} toast={toast.push} />}
             {tab === "activity" && session && <ActivityFeed roomCode={session.roomCode} presence={collab.presence} selfId={session.userId} />}
