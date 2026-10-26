@@ -40,6 +40,8 @@ export function checkConflicts(appointments, appt, slots, excludeId = null) {
 /** Every clash in the timetable, as { type, a, b, label }. Sessions are bucketed by week+day first, so this stays fast. */
 export function getAllConflicts(appointments, slots) {
   const all = [];
+  // A clash is "overridden" when either session was saved with an override for that kind of clash.
+  const ov = (a, b, t) => (Array.isArray(a.overrides) && a.overrides.includes(t)) || (Array.isArray(b.overrides) && b.overrides.includes(t));
   if (!appointments || typeof appointments !== "object") return all;
   const buckets = new Map();
   Object.values(appointments).filter(Boolean).map(norm).forEach(a => {
@@ -52,11 +54,11 @@ export function getAllConflicts(appointments, slots) {
         const b = list[j];
         if (!sessionsOverlap(a, b, slots)) continue;
         if (a.instructorId && a.instructorId === b.instructorId)
-          all.push({ type: "instructor", a, b, label: "Instructor double-booked" });
+          all.push({ type: "instructor", a, b, label: "Instructor double-booked", overridden: ov(a, b, "instructor") });
         if (a.roomId && a.roomId === b.roomId)
-          all.push({ type: "room", a, b, label: "Room double-booked" });
+          all.push({ type: "room", a, b, label: "Room double-booked", overridden: ov(a, b, "room") });
         if (!parallelSections(a, b) && a.groupIds.some(x => b.groupIds.includes(x)))
-          all.push({ type: "group", a, b, label: "Student group clash" });
+          all.push({ type: "group", a, b, label: "Student group clash", overridden: ov(a, b, "group") });
       }
     });
   });

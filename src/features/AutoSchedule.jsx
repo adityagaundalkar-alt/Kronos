@@ -50,7 +50,7 @@ function JobCard({ job, ji, state, onUpdate, onRemove, onToggle, onInstructorAva
   const weeks = jobWeeks(job);
 
   return (
-    <div style={{ background: "var(--bg2)", border: "1px solid var(--border2)", borderLeft: `4px solid ${pal ? pal.accent : "var(--border2)"}`, borderRadius: "var(--r2)", overflow: "hidden" }}>
+    <div style={{ background: "var(--bg2)", border: "1px solid var(--border2)", borderLeft: `4px solid ${pal ? pal.accent : "var(--border2)"}`, borderRadius: "var(--r2)", overflow: "hidden", flexShrink: 0 }}>
       <button type="button" onClick={onToggle} aria-expanded={job._open}
         style={{ width: "100%", padding: "12px 14px", display: "flex", alignItems: "center", gap: 10, textAlign: "left", background: job._open ? "var(--bg3)" : "transparent", borderBottom: job._open ? "1px solid var(--border)" : "none" }}>
         <span style={{ font: "600 13px var(--mono)", color: "var(--muted2)", width: 20 }}>{ji + 1}</span>
@@ -231,7 +231,7 @@ function ResultCard({ r, state, included, onInclude }) {
   const byWeek = [...r.placed].sort((a, b) => a.weekNum - b.weekNum || a.dayIdx - b.dayIdx);
   const missing = r.missing.filter(m => !m.holiday);
   return (
-    <section style={{ background: "var(--bg2)", border: "1px solid var(--border2)", borderLeft: `4px solid ${pal.accent}`, borderRadius: "var(--r2)", padding: "12px 14px" }}>
+    <section style={{ background: "var(--bg2)", border: "1px solid var(--border2)", borderLeft: `4px solid ${pal.accent}`, borderRadius: "var(--r2)", padding: "12px 14px", flexShrink: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <span style={{ font: "600 13px var(--mono)", color: pal.accent }}>{r.course?.code}</span>
         <strong style={{ fontSize: 15 }}>{r.course?.name || "Unknown course"}</strong>
@@ -313,7 +313,7 @@ export default function AutoScheduleTab({ state, setState, toast }) {
     const swapped = chosen.reduce((n, r) => n + r.removed.length, 0);
     const failed = result.reports.filter(r => r.status !== "full").length;
     return (
-      <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+      <div style={{ display: "flex", flexDirection: "column", flex: 1, height: "100%", minHeight: 0, overflow: "hidden" }}>
         <div style={{ padding: "12px 22px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", flexShrink: 0 }}>
           <Btn variant="outline" size="md" onClick={() => setResult(null)}><Icon name="left" size={16} /> Back to setup</Btn>
           <div style={{ flex: 1, minWidth: 180 }}>
@@ -331,7 +331,7 @@ export default function AutoScheduleTab({ state, setState, toast }) {
 
   // ── Setup ──
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, height: "100%", minHeight: 0, overflow: "hidden" }}>
       <div style={{ padding: "12px 22px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", flexShrink: 0 }}>
         <div style={{ flex: 1, minWidth: 220, color: "var(--muted)", fontSize: 14 }}>Describe what needs a place. The scheduler finds times with no clashes, no holidays and a room that fits, then shows you the result before anything is added.</div>
         <Btn variant="outline" size="md" onClick={() => setJobs(j => [...j, blankJob()])}><Icon name="plus" size={16} /> Add job</Btn>

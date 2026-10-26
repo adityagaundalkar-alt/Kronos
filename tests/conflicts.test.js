@@ -29,3 +29,13 @@ describe("conflicts", () => {
     expect(getAllConflicts({ a: A("a"), b: A("b", { timeId: "pm" }), c: A("c", { dayIdx: 1 }) }, slots)).toEqual([]);
   });
 });
+
+describe("overridden clashes", () => {
+  it("flags a clash as overridden when either session carries that override, and still reports it", () => {
+    const apps = { a: A("a", { courseId: "c1", overrides: ["instructor"] }), b: A("b", { courseId: "c2" }) };
+    const all = getAllConflicts(apps, slots);
+    expect(all.length).toBeGreaterThan(0);
+    expect(all.filter(c => c.type === "instructor").every(c => c.overridden)).toBe(true);
+    expect(all.filter(c => c.type !== "instructor").every(c => !c.overridden)).toBe(true);
+  });
+});
