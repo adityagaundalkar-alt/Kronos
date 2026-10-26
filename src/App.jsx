@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo, createContext, useContext } from "react";
 import {
   auth,
-  signInWithGoogle, signOutUser, onAuthChange, ensureAuth,
+  signInWithGoogle, explainAuthError, signOutUser, onAuthChange, ensureAuth,
   loadUserState, saveUserState,
   registerRoom, roomExists, loadRoom, writeRoomTree, updateRoom, subscribeRoom,
   pushOp, subscribeOps, subscribePresence, joinPresence,
@@ -249,10 +249,10 @@ function getAllConflicts(appointments) {
 // ═══════════════════════════════════════════════════════════════════
 function useToasts() {
   const [list,setList]=useState([]);
-  const push=useCallback((msg,type="ok")=>{
+  const push=useCallback((msg,type="ok",ms=3500)=>{
     const id=uid();
     setList(t=>[...t,{id,msg,type}]);
-    setTimeout(()=>setList(t=>t.filter(x=>x.id!==id)),3500);
+    setTimeout(()=>setList(t=>t.filter(x=>x.id!==id)),ms);
   },[]);
   const dismiss=useCallback(id=>setList(t=>t.filter(x=>x.id!==id)),[]);
   return {list,push,dismiss};
@@ -3551,7 +3551,8 @@ function LoginScreen({ onSkip }) {
     try {
       await signInWithGoogle();
     } catch(e) {
-      setError(e.message || "Sign-in failed. Check your Firebase config.");
+      const x=explainAuthError(e);
+      if(!x.silent) setError(x.message);
     }
     setLoading(false);
   }
@@ -3762,6 +3763,11 @@ export default function TimetableBuilder() {
     toast.push("Session deleted","warn");
   }
 
+  async function handleSignIn() {
+    try { await signInWithGoogle(); }
+    catch(e) { const x=explainAuthError(e); if(!x.silent) toast.push(x.message,"warn",10000); }
+  }
+
   async function handleSignOut() {
     flushCloudSave();
     const sess=collab.session;
@@ -3885,7 +3891,7 @@ export default function TimetableBuilder() {
             <Btn variant="ghost" size="xs" onClick={handleSignOut} title="Sign out">Sign out</Btn>
           </div>
         ) : (
-          <Btn variant="outline" size="xs" onClick={()=>signInWithGoogle()}>Sign in</Btn>
+          <Btn variant="outline" size="xs" onClick={handleSignIn}>Sign in</Btn>
         )}
         <Btn variant="accent" onClick={()=>setModal({weekNum:1,dayIdx:0,timeId:state.slots[0]?.id})}>
           + Schedule

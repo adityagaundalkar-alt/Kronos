@@ -45,6 +45,27 @@ const googleProvider = new GoogleAuthProvider();
 
 // --- Auth Functions ---
 export const signInWithGoogle = () => signInWithPopup(auth, googleProvider);
+
+/** Turn a Firebase auth error into something a person can act on. `silent` = not worth showing. */
+export const explainAuthError = (e) => {
+  const code = e?.code || "";
+  const host = typeof location !== "undefined" ? location.hostname : "this site";
+  switch (code) {
+    case "auth/popup-closed-by-user":
+    case "auth/cancelled-popup-request":
+      return { silent: true, message: "" };
+    case "auth/unauthorized-domain":
+      return { message: `Google sign-in isn't allowed on "${host}" yet. A Firebase admin needs to add it: Firebase Console → Authentication → Settings → Authorized domains → Add domain "${host}".` };
+    case "auth/popup-blocked":
+      return { message: "Your browser blocked the sign-in pop-up. Allow pop-ups for this site and try again." };
+    case "auth/network-request-failed":
+      return { message: "Couldn't reach Google — check your connection and try again." };
+    case "auth/operation-not-allowed":
+      return { message: "Google sign-in isn't switched on for this Firebase project (Authentication → Sign-in method → Google)." };
+    default:
+      return { message: e?.message || "Sign-in failed. Please try again." };
+  }
+};
 export const signOutUser = () => signOut(auth);
 export const onAuthChange = (callback) => onAuthStateChanged(auth, callback);
 
