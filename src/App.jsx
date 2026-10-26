@@ -8,8 +8,10 @@ import { DAYS, DAYS_FULL, WEEKS, PALETTE, ROOM_TYPES, CATEGORIES, uid, initials,
 import { emptyState, termFrom, sanitizeState, loadLocal, saveLocal, backupLocalState, loadRecentRooms, forgetRoom } from "./state.js";
 import { PresenceCtx, CollabCtx } from "./collab/context.js";
 import { askConfirm, ConfirmProvider } from "./ui/Confirm.jsx";
+import { buildGroupTree } from "./groups.js";
 import { changesBetween, applyChanges, invert, MAX_HISTORY } from "./history.js";
 import GroupPicker from "./ui/GroupPicker.jsx";
+import SearchSelect from "./ui/SearchSelect.jsx";
 import { Badge, Btn, Modal, Field, EmptyState, Segmented, Avatar, useMedia, useTheme, useToasts, Toasts } from "./ui/kit.jsx";
 import Icon from "./ui/Icon.jsx";
 import AvailabilityGrid from "./features/AvailabilityGrid.jsx";
@@ -129,15 +131,10 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
         <fieldset disabled={readOnly} style={{border:0,padding:0,margin:0,minWidth:0}}>
         {/* Course */}
         <Field label="Course" required>
-          <select value={other?"__other":form.courseId} onChange={e=>{
-            const v=e.target.value;
+          <SearchSelect value={other?"__other":form.courseId} placeholder="— Select course —" options={[...courses.map(c=>({value:c.id,label:`[${c.code}] ${c.name}`})),{value:"__other",label:"Other event (extra class, workshop, exam…)"}]} onChange={v=>{
             if(v==="__other"){setOther(true);setForm(f=>({...f,courseId:"",instructorId:"",groupIds:[]}));}
             else{setOther(false);setForm(f=>{const n={...f,courseId:v,instructorId:"",groupIds:[]};delete n.courseName;delete n.courseCode;return n;});}
-          }}>
-            <option value="">— Select course —</option>
-            {courses.map(c=><option key={c.id} value={c.id}>[{c.code}] {c.name}</option>)}
-            <option value="__other">Other event (extra class, workshop, exam…)</option>
-          </select>
+          }}/>
         </Field>
         {other&&(
           <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:8}}>
@@ -212,16 +209,10 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
         {/* Instructor + Room */}
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
           <Field label="Instructor">
-            <select value={form.instructorId} onChange={e=>setForm(f=>({...f,instructorId:e.target.value}))}>
-              <option value="">— None —</option>
-              {instructors.map(i=><option key={i.id} value={i.id}>{i.name}</option>)}
-            </select>
+            <SearchSelect value={form.instructorId||""} onChange={v=>setForm(f=>({...f,instructorId:v}))} noneLabel="— None —" options={instructors.map(i=>({value:i.id,label:i.name}))}/>
           </Field>
           <Field label="Room">
-            <select value={form.roomId} onChange={e=>setForm(f=>({...f,roomId:e.target.value}))}>
-              <option value="">— TBD —</option>
-              {rooms.map(r=><option key={r.id} value={r.id}>{r.name} ({r.capacity})</option>)}
-            </select>
+            <SearchSelect value={form.roomId||""} onChange={v=>setForm(f=>({...f,roomId:v}))} noneLabel="— TBD —" options={rooms.map(r=>({value:r.id,label:r.name,hint:`${r.capacity} seats`}))}/>
           </Field>
         </div>
 
@@ -495,7 +486,7 @@ function exportCohortCSV(state, groupId) {
 
 
 // ── Export dropdown component ──────────────────────────────────────
-function ExportDropdown({state,filterGroup}) {
+function ExportDropdown({state,filterGroups=[]}) {
   const [open,setOpen]=useState(false);
   const ref=useRef();
   useEffect(()=>{
@@ -504,8 +495,8 @@ function ExportDropdown({state,filterGroup}) {
     return()=>document.removeEventListener("mousedown",h);
   },[]);
   const groups=state.groups;
-  const targetGroup=filterGroup||null;
-  const label=targetGroup?groups.find(g=>g.id===targetGroup)?.name:"Select a group first";
+  const targets=filterGroups.filter(id=>groups.some(g=>g.id===id));
+  const targetGroup=targets.length===1?targets[0]:null;
 
   return (
     <div ref={ref} style={{position:"relative"}}>
@@ -520,11 +511,18 @@ function ExportDropdown({state,filterGroup}) {
             fontSize:11.5,color:"var(--muted)",fontWeight:600,textTransform:"uppercase",letterSpacing:"0.08em"}}>
             Export Cohort Timetable
           </div>
-          {!targetGroup&&(
+          {targets.length===0&&(
             <div style={{padding:"10px 12px",fontSize:12.5,color:"var(--muted)"}}>
               Use the group filter to select a cohort first
             </div>
           )}
+          {targets.length>1&&targets.map(id=>(
+            <div key={id} style={{padding:"8px 14px",fontSize:13,borderBottom:"1px solid var(--border)",display:"flex",alignItems:"center",gap:8}}>
+              <span style={{flex:1,fontWeight:500}}>{groups.find(g=>g.id===id)?.name}</span>
+              <Btn variant="outline" size="xs" onClick={()=>{exportCohortHTML(state,id);setOpen(false);}}>HTML</Btn>
+              <Btn variant="outline" size="xs" onClick={()=>{exportCohortCSV(state,id);setOpen(false);}}>CSV</Btn>
+            </div>
+          ))}
           {targetGroup&&(
             <>
               <div onClick={()=>{exportCohortHTML(state,targetGroup);setOpen(false);}}
@@ -578,7 +576,7 @@ function ScheduleTab({state,onApptClick,onCellClick,conflicts}) {
   const {appointments,courses,instructors,rooms,week1Start,holidays,slots}=state;
   const {canEdit}=useContext(CollabCtx);
   const isPhone=useMedia("(max-width: 760px)");
-  const [filterGroup,setFilterGroup]=useState("");
+  const [filterGroups,setFilterGroups]=useState([]);
   const [selWeek,setSelWeek]=useState(1);
   const ws=getWeekStart(week1Start,selWeek);
   const days=DAYS.slice(0,Object.values(appointments).some(x=>x.dayIdx>=5)?DAYS.length:5); // Saturday appears only when a session uses it
@@ -592,12 +590,12 @@ function ScheduleTab({state,onApptClick,onCellClick,conflicts}) {
     const m={};
     Object.values(appointments).forEach(a=>{
       if(a.weekNum!==selWeek) return;
-      if(filterGroup&&!(a.groupIds||[]).includes(filterGroup)) return;
+      if(filterGroups.length&&!(a.groupIds||[]).some(g=>filterGroups.includes(g))) return;
       (m[`${a.dayIdx}_${a.timeId}`]||=[]).push(a);
     });
     Object.values(m).forEach(list=>list.sort((x,y)=>startKey(x,slots)-startKey(y,slots)));
     return m;
-  },[appointments,selWeek,filterGroup,slots]);
+  },[appointments,selWeek,filterGroups,slots]);
 
   const chip=a=><ApptChip key={a.id} appt={a} courses={courses} instructors={instructors} rooms={rooms} onClick={onApptClick} conflicts={conflicts}/>;
   const addBtn=(di,slot,label)=>canEdit&&(
@@ -617,11 +615,8 @@ function ScheduleTab({state,onApptClick,onCellClick,conflicts}) {
         </div>
         <span style={{fontSize:14,color:"var(--muted)",fontFamily:"var(--mono)"}}>{fmt(ws)} to {fmt(addDays(ws,days.length-1))}</span>
         <div style={{flex:1}}/>
-        <select aria-label="Filter by student group" value={filterGroup} onChange={e=>setFilterGroup(e.target.value)} style={{width:150}}>
-          <option value="">All groups</option>
-          {state.groups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
-        </select>
-        <ExportDropdown state={state} filterGroup={filterGroup}/>
+        <GroupPicker groups={state.groups} value={filterGroups} onChange={setFilterGroups} compact noneLabel="All groups" placeholder="All groups" style={{width:260,maxWidth:"100%"}}/>
+        <ExportDropdown state={state} filterGroups={filterGroups}/>
       </div>
 
       <div style={{flex:1,overflow:"auto",padding:isPhone?12:16,minHeight:0,WebkitOverflowScrolling:"touch"}}>
@@ -1265,10 +1260,7 @@ function CourseEditor({form,setForm,instructors,groups,onSave,onDelete,onClose})
             onChange={e=>set("credits",+e.target.value)}/>
         </Field>
         <Field label="Default Instructor">
-          <select value={form.defaultInstructorId} onChange={e=>set("defaultInstructorId",e.target.value)}>
-            <option value="">— None —</option>
-            {instructors.map(i=><option key={i.id} value={i.id}>{i.name}</option>)}
-          </select>
+          <SearchSelect value={form.defaultInstructorId||""} onChange={v=>set("defaultInstructorId",v)} noneLabel="— None —" options={instructors.map(i=>({value:i.id,label:i.name}))}/>
         </Field>
       </div>
       <Field label="Default Student Groups" hint="Pre-selected when scheduling this course">
@@ -1525,6 +1517,8 @@ function RoomsPanel({state,setState,toast}) {
 function GroupsPanel({state,setState,toast}) {
   const {groups}=state;
   const [editing,setEditing]=useState(null);
+  const [openFolders,setOpenFolders]=useState({});
+  const [gq,setGq]=useState("");
   const blank={id:"",name:"",parentId:null,size:30};
 
   function save(form) {
@@ -1546,8 +1540,8 @@ function GroupsPanel({state,setState,toast}) {
     setEditing(null);
   }
 
-  function GroupNode({g,depth=0}) {
-    const children=groups.filter(x=>x.parentId===g.id);
+  function GroupNode({g,depth=0,noKids=false}) {
+    const children=noKids?[]:groups.filter(x=>x.parentId===g.id);
     return (
       <div>
         <div onClick={()=>setEditing({...g})}
@@ -1563,7 +1557,7 @@ function GroupsPanel({state,setState,toast}) {
     );
   }
 
-  const roots=groups.filter(g=>!g.parentId);
+  const tree=useMemo(()=>buildGroupTree(groups),[groups]);
 
   return (
     <div style={{display:"flex",height:"100%"}}>
@@ -1572,7 +1566,31 @@ function GroupsPanel({state,setState,toast}) {
           <Btn variant="accent" style={{width:"100%",justifyContent:"center"}} onClick={()=>setEditing({...blank})}>+ Add Group</Btn>
         </div>
         <div style={{flex:1,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch"}}>
-          {roots.map(g=><GroupNode key={g.id} g={g}/>)}
+          {groups.length>8&&(
+            <div style={{padding:8,borderBottom:"1px solid var(--border)"}}>
+              <input value={gq} onChange={e=>setGq(e.target.value)} placeholder="Search groups…" aria-label="Search groups" style={{width:"100%"}}/>
+            </div>
+          )}
+          {gq.trim()
+            ? groups.filter(g=>g.name.toLowerCase().includes(gq.trim().toLowerCase())).map(g=><GroupNode key={g.id} g={{...g,parentId:null}} noKids/>)
+            : tree.map(n=>{
+                if(!n.children.length) return <GroupNode key={n.key} g={n.self} noKids/>;
+                const open=openFolders[n.key]??(editing&&(editing.id===n.self?.id||n.children.some(c=>c.id===editing.id)));
+                return (
+                  <div key={n.key}>
+                    <button type="button" aria-expanded={!!open} onClick={()=>setOpenFolders(o=>({...o,[n.key]:!open}))}
+                      style={{width:"100%",textAlign:"left",padding:"9px 12px",display:"flex",alignItems:"center",gap:8,borderBottom:"1px solid var(--border)",fontWeight:600,fontSize:13}}>
+                      <Icon name={open?"down":"right"} size={14} style={{color:"var(--muted)"}}/>
+                      <span style={{flex:1}}>{n.label}</span>
+                      <span style={{fontSize:12,color:"var(--muted)",fontWeight:400}}>{n.children.length}</span>
+                    </button>
+                    {open&&<>
+                      {n.self&&<GroupNode g={n.self} noKids/>}
+                      {n.children.map(c=><GroupNode key={c.id} g={c} depth={1} noKids/>)}
+                    </>}
+                  </div>
+                );
+              })}
         </div>
       </div>
       {editing&&(
@@ -1590,10 +1608,7 @@ function GroupsPanel({state,setState,toast}) {
           </Field>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
             <Field label="Parent Group" hint="Leave empty for top-level">
-              <select value={editing.parentId||""} onChange={e=>setEditing(f=>({...f,parentId:e.target.value||null}))}>
-                <option value="">— Top level —</option>
-                {groups.filter(g=>g.id!==editing.id).map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
-              </select>
+              <GroupPicker single groups={groups.filter(g=>g.id!==editing.id)} value={editing.parentId?[editing.parentId]:[]} onChange={v=>setEditing(f=>({...f,parentId:v[0]||null}))} noneLabel="— Top level —"/>
             </Field>
             <Field label="Student Count">
               <input type="number" min={0} value={editing.size||""} onChange={e=>setEditing(f=>({...f,size:+e.target.value}))}/>
@@ -1646,9 +1661,7 @@ function InstructorTab({state,onApptClick}) {
     <div style={{display:"flex",flexDirection:"column",height:"100%"}}>
       <div style={{padding:"10px 14px",borderBottom:"1px solid var(--border)",
         display:"flex",alignItems:"center",gap:10,flexShrink:0,flexWrap:"wrap"}}>
-        <select value={selInstructor} onChange={e=>setSelInstructor(e.target.value)} style={{width:200}}>
-          {instructors.map(i=><option key={i.id} value={i.id}>{i.name}</option>)}
-        </select>
+        <SearchSelect label="Instructor" value={selInstructor} onChange={setSelInstructor} style={{width:240,maxWidth:"100%"}} placeholder="Choose an instructor" options={instructors.map(i=>({value:i.id,label:i.name}))}/>
         <select value={selWeek} onChange={e=>setSelWeek(+e.target.value)} style={{width:130}}>
           {WEEKS.map(w=><option key={w.n} value={w.n}>{w.label}</option>)}
         </select>
