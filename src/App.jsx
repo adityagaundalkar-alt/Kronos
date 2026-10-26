@@ -1822,6 +1822,7 @@ function SettingsTab({state,setState,toast}) {
     setState(s=>({...s,holidays:s.holidays.filter(h=>h.id!==id)}));
   }
 
+  const importRef=useRef(null);
   function exportData() {
     const blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});
     const a=document.createElement("a");
@@ -1831,6 +1832,7 @@ function SettingsTab({state,setState,toast}) {
   }
   function importData(e) {
     const file=e.target.files[0];
+    e.target.value=""; // so choosing the same file again still fires
     if(!file) return;
     const reader=new FileReader();
     reader.onload=ev=>{
@@ -1909,11 +1911,9 @@ function SettingsTab({state,setState,toast}) {
           letterSpacing:"0.08em",marginBottom:12}}>Data Management</div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
           <Btn variant="outline" onClick={exportData}><Icon name="download" size={15}/> Export JSON</Btn>
-          <label style={{cursor:"pointer"}}>
-            <Btn variant="outline" as="span">Import JSON</Btn>
-            <input type="file" accept=".json" onChange={importData} style={{display:"none"}}/>
-          </label>
-          <Btn variant="danger" onClick={resetData}>⟳ Reset to Defaults</Btn>
+          <Btn variant="outline" onClick={()=>importRef.current?.click()}>Import JSON</Btn>
+          <input ref={importRef} type="file" accept=".json,application/json" aria-label="Import JSON file" onChange={importData} style={{display:"none"}}/>
+          <Btn variant="danger" onClick={resetData}>Clear this term</Btn>
         </div>
       </div>
     </div>
