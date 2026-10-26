@@ -354,3 +354,36 @@ describe("archived terms (read-only for everyone)", () => {
     await expect(cara.store.set(`rooms/${room.rid}/v2/courses/c3`, { id: "c3" })).rejects.toMatchObject(denied);
   });
 });
+
+describe("saved versions", () => {
+  const vpath = id => `rooms/${room.rid}/versions/${id}`;
+  const version = (extra = {}) => ({ name: "Before import", at: 1, by: "Alice", data: "{}", ...extra });
+
+  it("editors and admins can save one; every member can read them", async () => {
+    await alice.store.set(vpath("v1"), version());
+    await bob.store.set(vpath("v2"), version({ name: "Mine" }));
+    expect(Object.keys(await cara.store.get(`rooms/${room.rid}/versions`))).toHaveLength(2);
+  });
+  it("viewers and outsiders cannot save, and outsiders cannot read", async () => {
+    await expect(cara.store.set(vpath("v1"), version())).rejects.toMatchObject(denied);
+    await expect(mallory.store.set(vpath("v1"), version())).rejects.toMatchObject(denied);
+    await alice.store.set(vpath("v1"), version());
+    await expect(mallory.store.get(vpath("v1"))).rejects.toMatchObject(denied);
+  });
+  it("a saved version cannot be rewritten, only deleted", async () => {
+    await bob.store.set(vpath("v1"), version());
+    await expect(bob.store.set(vpath("v1"), version({ data: "{\"x\":1}" }))).rejects.toMatchObject(denied);
+    await expect(alice.store.update(vpath("v1"), { name: "renamed" })).rejects.toMatchObject(denied);
+    await bob.store.remove(vpath("v1"));
+    expect(await alice.store.get(vpath("v1"))).toBeNull();
+  });
+  it("must be well formed and not oversized", async () => {
+    await expect(alice.store.set(vpath("v1"), { name: "x", at: 1 })).rejects.toMatchObject(denied);
+    await expect(alice.store.set(vpath("v1"), version({ data: "x".repeat(1500001) }))).rejects.toMatchObject(denied);
+  });
+  it("an archived term takes no new versions", async () => {
+    await alice.access.setArchived(room.rid, true);
+    await expect(alice.store.set(vpath("v1"), version())).rejects.toMatchObject(denied);
+    expect(await cara.store.get(`rooms/${room.rid}/versions`)).toBeNull();
+  });
+});

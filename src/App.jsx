@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo, useContext } from "react";
-import { signInWithGoogle, explainAuthError, signOutUser, ensureAuth, onAuthChange, access, loadRoom, listMyTerms, saveMyTerm, removeMyTerm } from "./firebase.js";
+import { signInWithGoogle, linkWithGoogle, currentUser, explainAuthError, signOutUser, ensureAuth, onAuthChange, access, loadRoom, listMyTerms, saveMyTerm, removeMyTerm } from "./firebase.js";
 import { iso, parseISO, addDays, fmt, fmtLong, getWeekStart, slotDate } from "./dates.js";
 import { treeToState } from "./sync.js";
 import { checkConflicts, getAllConflicts } from "./conflicts.js";
@@ -7,6 +7,12 @@ import { slotRange, customLabel, timeLabel, startKey, validateCustomTimes, fromM
 import { DAYS, DAYS_FULL, WEEKS, PALETTE, ROOM_TYPES, CATEGORIES, uid, initials, getPalette, paletteById } from "./constants.js";
 import { emptyState, termFrom, sanitizeState, loadLocal, saveLocal, backupLocalState, loadRecentRooms, forgetRoom } from "./state.js";
 import { PresenceCtx, CollabCtx } from "./collab/context.js";
+import VersionsPanel from "./features/Versions.jsx";
+import useVersions from "./collab/useVersions.js";
+import { stateFromVersion } from "./versions.js";
+import { planMoves, shiftMoves } from "./move.js";
+import { planRepeat } from "./repeat.js";
+import { suggestFixes } from "./fixes.js";
 import { askConfirm, ConfirmProvider } from "./ui/Confirm.jsx";
 import { buildGroupTree } from "./groups.js";
 import { changesBetween, applyChanges, invert, MAX_HISTORY } from "./history.js";
@@ -18,7 +24,7 @@ import AvailabilityGrid from "./features/AvailabilityGrid.jsx";
 import { CommentsPanel, CommentsTab } from "./features/Comments.jsx";
 import AutoScheduleTab from "./features/AutoSchedule.jsx";
 import { useCollaboration } from "./collab/useCollaboration.js";
-import { CollabModal, ShareModal, RoomBar, AccessLostModal, ActivityFeed, RolePill } from "./collab/CollabUI.jsx";
+import { CollabModal, ShareModal, RoomBar, AdminKeepBanner, AccessLostModal, ActivityFeed, RolePill } from "./collab/CollabUI.jsx";
 import { codeFromSearch, ROLE_LABEL } from "./access.js";
 import { Rail, TabBar, MoreSheet, visibleViews, VIEWS } from "./shell/Shell.jsx";
 import LoginScreen from "./shell/Login.jsx";
@@ -35,7 +41,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
     const w=weekNum??1,d=dayIdx??0,t=timeId??slots[0]?.id;
     return {weekNum:w,dayIdx:d,timeId:t,courseId:"",instructorId:"",roomId:"",groupIds:[],section:"",notes:""};
   });
-  const [scheduleAll,setScheduleAll]=useState(false);
+  const [repeat,setRepeat]=useState({every:0,until:16});
   // "Other event": extra classes, workshops, exams - anything that is not one of the term's courses.
   const [other,setOther]=useState(()=>!!(isEdit&&!appt.courseId&&appt.courseName));
   const hasWhat=!!form.courseId||(other&&!!(form.courseName||"").trim());
@@ -80,6 +86,8 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
 
   const conflicts=useMemo(()=>checkConflicts(appointments,effective,slots,isEdit?appt.id:null),[effective,appointments,slots]);
   const blockingConflicts=conflicts.filter(c=>!overrides[c.type]);
+  // What a repeat would save, with the weeks it has to skip.
+  const plan=useMemo(()=>repeat.every>0&&!isEdit?planRepeat({appointments,slots,holidays:state.holidays,week1Start:state.week1Start},{...effective,overrides:[...new Set(conflicts.map(c=>c.type))].filter(t=>overrides[t])},{every:repeat.every,until:Math.max(repeat.until,form.weekNum),newId:uid}):null,[repeat,effective,appointments,slots,overrides,conflicts,isEdit,state.holidays,state.week1Start,form.weekNum]);
 
   function handleSave() {
     if(!hasWhat||form.weekNum===undefined) return;
@@ -93,11 +101,10 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
     const kept=[...new Set(conflicts.map(c=>c.type))].filter(t=>overrides[t]);
     if(kept.length) base.overrides=kept; else delete base.overrides;
     const toSave=[];
-    if(scheduleAll&&!isEdit) {
-      WEEKS.filter(w=>w.n>0).forEach(w=>{
-        const wConflicts=checkConflicts(appointments,{...base,weekNum:w.n},slots);
-        if(!wConflicts.length) toSave.push({...base,id:uid(),weekNum:w.n});
-      });
+    if(repeat.every>0&&!isEdit) {
+      const real=planRepeat({appointments,slots,holidays:state.holidays,week1Start:state.week1Start},base,{every:repeat.every,until:Math.max(repeat.until,form.weekNum),newId:uid});
+      toSave.push(...real.toSave);
+      if(!toSave.length) return;
     } else {
       toSave.push(isEdit?{...base,id:appt.id}:{...base,id:uid()});
     }
@@ -256,14 +263,33 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
           <span style={{fontSize:14}}><b>Pin this session</b><span style={{display:"block",color:"var(--muted)",fontSize:14}}>Auto-schedule won't move or remove it.</span></span>
         </label>
 
-        {/* Schedule All */}
+        {/* Repeat */}
         {!isEdit&&(
-          <label style={{display:"flex",alignItems:"center",gap:8,marginBottom:16,cursor:"pointer",
-            padding:"8px 10px",borderRadius:"var(--r)",background:"var(--bg3)",
-            border:"1px solid var(--border)"}}>
-            <input type="checkbox" checked={scheduleAll} onChange={e=>setScheduleAll(e.target.checked)}/>
-            <span style={{fontSize:14,color:"var(--text)"}}>Repeat in every week (skips weeks with clashes)</span>
-          </label>
+          <div style={{marginBottom:16,padding:"10px 12px",borderRadius:"var(--r)",background:"var(--bg3)",border:"1px solid var(--border)"}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+              <label htmlFor="rep-every" style={{fontSize:14,fontWeight:600}}>Repeat</label>
+              <select id="rep-every" value={repeat.every} onChange={e=>setRepeat(r=>({...r,every:+e.target.value}))} style={{width:"auto"}}>
+                <option value={0}>Does not repeat</option>
+                <option value={1}>Every week</option>
+                <option value={2}>Every 2 weeks</option>
+                <option value={3}>Every 3 weeks</option>
+                <option value={4}>Every 4 weeks</option>
+              </select>
+              {repeat.every>0&&<>
+                <label htmlFor="rep-until" style={{fontSize:14}}>until</label>
+                <select id="rep-until" value={Math.max(repeat.until,form.weekNum)} onChange={e=>setRepeat(r=>({...r,until:+e.target.value}))} style={{width:"auto"}}>
+                  {WEEKS.filter(w=>w.n>=form.weekNum&&w.n>0).map(w=><option key={w.n} value={w.n}>{w.label}</option>)}
+                </select>
+              </>}
+            </div>
+            {plan&&(
+              <div role="status" style={{fontSize:13,color:"var(--muted)",marginTop:8}}>
+                {plan.toSave.length?`Will add ${plan.toSave.length} session${plan.toSave.length===1?"":"s"}: ${plan.toSave.map(a=>WEEKS.find(w=>w.n===a.weekNum)?.short).join(", ")}.`:"Nothing can be added with these settings."}
+                {plan.holiday.length>0&&` Skipping holidays: ${plan.holiday.map(w=>`W${w}`).join(", ")}.`}
+                {plan.clash.length>0&&` Skipping clashes: ${plan.clash.map(w=>`W${w}`).join(", ")}.`}
+              </div>
+            )}
+          </div>
         )}
         </fieldset>
 
@@ -299,7 +325,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
 // ═══════════════════════════════════════════════════════════════════
 //  CHIP (appointment cell)
 // ═══════════════════════════════════════════════════════════════════
-function ApptChip({appt,courses,instructors,rooms,onClick,conflicts=[]}) {
+function ApptChip({appt,courses,instructors,rooms,onClick,conflicts=[],selectable=false,selected=false,draggable=false,onDragStart,onDragEnd}) {
   const pal=getPalette(appt.courseId,courses);
   const hasConflict=(conflicts||[]).some(c=>c&&c.a&&c.b&&(c.a.id===appt.id||c.b.id===appt.id));
   const instr=instructors.find(x=>x.id===appt.instructorId);
@@ -309,10 +335,12 @@ function ApptChip({appt,courses,instructors,rooms,onClick,conflicts=[]}) {
   const label=`${appt.courseCode} ${appt.courseName}${instr?`, ${instr.name}`:""}${room?`, ${room.name}`:""}${hasConflict?", has a clash":""}${appt.locked?", pinned":""}${openComments?`, ${openComments} open comment${openComments>1?"s":""}`:""}`;
   return (
     <button type="button" className={`session${hasConflict?" clash":""}`} onClick={e=>{e.stopPropagation();onClick(appt);}}
-      aria-label={label}
+      aria-label={label} aria-pressed={selectable?selected:undefined}
+      draggable={draggable||undefined} onDragStart={draggable?e=>onDragStart?.(e,appt):undefined} onDragEnd={draggable?onDragEnd:undefined}
       title={editors.length?`Being edited by ${editors.map(e=>e.name).join(", ")}`:undefined}
       style={{background:pal.bg,borderColor:editors.length?editors[0].color:pal.border,borderLeftColor:pal.accent,color:pal.accent,
-        boxShadow:editors.length?`0 0 0 1px ${editors[0].color}`:undefined}}>
+        boxShadow:selected?"0 0 0 2px var(--accent)":editors.length?`0 0 0 1px ${editors[0].color}`:undefined,cursor:draggable?"grab":undefined,outline:selected?"2px solid var(--accent)":undefined,outlineOffset:selected?1:undefined}}>
+      {selectable&&<span aria-hidden="true" style={{position:"absolute",top:3,right:4,width:16,height:16,borderRadius:4,border:"1.5px solid "+(selected?"var(--accent)":"var(--border2)"),background:selected?"var(--accent)":"var(--bg2)",color:"var(--on-accent)",display:"grid",placeItems:"center"}}>{selected&&<Icon name="check" size={11} style={{strokeWidth:3}}/>}</span>}
       <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:1}}>
         <span className="code">{appt.courseCode}{appt.section?` §${appt.section}`:""}</span>
         {customLabel(appt)&&<span title="Custom time" style={{fontSize:11.5,fontFamily:"var(--mono)",color:"var(--muted)"}}>{customLabel(appt)}</span>}
@@ -572,12 +600,16 @@ function ExportDropdown({state,filterGroups=[]}) {
 // ═══════════════════════════════════════════════════════════════════
 //  SCHEDULE TAB
 // ═══════════════════════════════════════════════════════════════════
-function ScheduleTab({state,onApptClick,onCellClick,conflicts}) {
+function ScheduleTab({state,onApptClick,onCellClick,conflicts,onMove,onDeleteMany}) {
   const {appointments,courses,instructors,rooms,week1Start,holidays,slots}=state;
   const {canEdit}=useContext(CollabCtx);
   const isPhone=useMedia("(max-width: 760px)");
   const [filterGroups,setFilterGroups]=useState([]);
   const [selWeek,setSelWeek]=useState(1);
+  const [selectMode,setSelectMode]=useState(false);
+  const [sel,setSel]=useState([]);
+  const dragRef=useRef(null);
+  const [overCell,setOverCell]=useState(null);
   const ws=getWeekStart(week1Start,selWeek);
   const days=DAYS.slice(0,Object.values(appointments).some(x=>x.dayIdx>=5)?DAYS.length:5); // Saturday appears only when a session uses it
 
@@ -597,7 +629,24 @@ function ScheduleTab({state,onApptClick,onCellClick,conflicts}) {
     return m;
   },[appointments,selWeek,filterGroups,slots]);
 
-  const chip=a=><ApptChip key={a.id} appt={a} courses={courses} instructors={instructors} rooms={rooms} onClick={onApptClick} conflicts={conflicts}/>;
+  const toggleSel=id=>setSel(l=>l.includes(id)?l.filter(x=>x!==id):[...l,id]);
+  const visibleIds=Object.values(apptMap).flat().map(a=>a.id);
+  const slotOrder=slots.map(x=>x.id);
+  function startDrag(e,a) {
+    dragRef.current=a.id;
+    e.dataTransfer.effectAllowed="move";
+    e.dataTransfer.setData("text/plain",a.id);
+  }
+  function dropOn(di,slotId) {
+    const a=appointments[dragRef.current]; dragRef.current=null; setOverCell(null);
+    if(!a||!onMove) return;
+    const ids=sel.includes(a.id)?sel:[a.id]; // dragging one of the selected sessions moves them all by the same amount
+    const dDay=di-a.dayIdx, dSlot=slotOrder.indexOf(slotId)-slotOrder.indexOf(a.timeId), dWeek=selWeek-a.weekNum;
+    onMove(ids.map(id=>{const x=appointments[id]; if(!x) return {id}; const si=slotOrder.indexOf(x.timeId)+dSlot; return {id,weekNum:x.weekNum+dWeek,dayIdx:x.dayIdx+dDay,timeId:slotOrder[si]??""};}),ids.length>1?`${ids.length} sessions`:(a.courseCode||a.courseName));
+  }
+  const chip=a=><ApptChip key={a.id} appt={a} courses={courses} instructors={instructors} rooms={rooms} conflicts={conflicts}
+    onClick={selectMode?(x=>toggleSel(x.id)):onApptClick} selectable={selectMode} selected={sel.includes(a.id)}
+    draggable={canEdit&&!selectMode||canEdit&&selectMode&&sel.includes(a.id)} onDragStart={startDrag} onDragEnd={()=>{dragRef.current=null;setOverCell(null);}}/>;
   const addBtn=(di,slot,label)=>canEdit&&(
     <button type="button" className="add-hint" aria-label={label} onClick={e=>{e.stopPropagation();onCellClick(selWeek,di,slot.id);}}
       style={{width:"100%",background:"transparent",border:0}}><Icon name="plus" size={16}/></button>
@@ -615,9 +664,28 @@ function ScheduleTab({state,onApptClick,onCellClick,conflicts}) {
         </div>
         <span style={{fontSize:14,color:"var(--muted)",fontFamily:"var(--mono)"}}>{fmt(ws)} to {fmt(addDays(ws,days.length-1))}</span>
         <div style={{flex:1}}/>
+        {canEdit&&<Btn variant={selectMode?"accent":"outline"} onClick={()=>{setSelectMode(v=>!v);setSel([]);}} aria-pressed={selectMode}>{selectMode?"Done selecting":"Select"}</Btn>}
         <GroupPicker groups={state.groups} value={filterGroups} onChange={setFilterGroups} compact noneLabel="All groups" placeholder="All groups" style={{width:260,maxWidth:"100%"}}/>
         <ExportDropdown state={state} filterGroups={filterGroups}/>
       </div>
+      {selectMode&&(
+        <div className="no-print" role="toolbar" aria-label="Selected sessions" style={{padding:"8px 16px",borderBottom:"1px solid var(--border)",background:"var(--accent-soft)",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",flexShrink:0}}>
+          <b style={{fontSize:14}}>{sel.length} selected</b>
+          <Btn variant="outline" size="xs" onClick={()=>setSel(visibleIds)}>All in this week</Btn>
+          <Btn variant="outline" size="xs" onClick={()=>setSel([])} disabled={!sel.length}>Clear</Btn>
+          <span style={{width:1,height:20,background:"var(--border2)"}}/>
+          <Btn variant="outline" size="xs" disabled={!sel.length} onClick={()=>onMove(shiftMoves(state,sel,{days:-1}),`${sel.length} sessions`)}>Day ‹</Btn>
+          <Btn variant="outline" size="xs" disabled={!sel.length} onClick={()=>onMove(shiftMoves(state,sel,{days:1}),`${sel.length} sessions`)}>Day ›</Btn>
+          <Btn variant="outline" size="xs" disabled={!sel.length} onClick={()=>onMove(shiftMoves(state,sel,{weeks:-1}),`${sel.length} sessions`)}>Week ‹</Btn>
+          <Btn variant="outline" size="xs" disabled={!sel.length} onClick={()=>onMove(shiftMoves(state,sel,{weeks:1}),`${sel.length} sessions`)}>Week ›</Btn>
+          <select aria-label="Move selected to week" disabled={!sel.length} value="" onChange={e=>{if(e.target.value!=="")onMove(sel.map(id=>({id,weekNum:+e.target.value})),`${sel.length} sessions`);}} style={{width:"auto"}}>
+            <option value="">Move to week…</option>
+            {WEEKS.map(w=><option key={w.n} value={w.n}>{w.label}</option>)}
+          </select>
+          <div style={{flex:1}}/>
+          <Btn variant="danger" size="xs" disabled={!sel.length} onClick={async()=>{if(await onDeleteMany(sel))setSel([]);}}><Icon name="trash" size={14}/> Delete</Btn>
+        </div>
+      )}
 
       <div style={{flex:1,overflow:"auto",padding:isPhone?12:16,minHeight:0,WebkitOverflowScrolling:"touch"}}>
         {!isPhone?(
@@ -648,8 +716,11 @@ function ScheduleTab({state,onApptClick,onCellClick,conflicts}) {
                       const h=holidayOn(di), cells=apptMap[`${di}_${slot.id}`]||[];
                       if(h) return <td key={di} className="cell holiday" style={{textAlign:"center",color:"var(--warn)",fontSize:14}}>{cells.length?cells.map(chip):"Holiday"}</td>;
                       return (
-                        <td key={di} className={`cell${canEdit?"":" readonly"}`}
-                          onClick={()=>{if(canEdit&&cells.length===0)onCellClick(selWeek,di,slot.id);}}>
+                        <td key={di} className={`cell${canEdit?"":" readonly"}${overCell===`${di}_${slot.id}`?" drop-target":""}`}
+                          onDragOver={canEdit?e=>{if(!dragRef.current)return;e.preventDefault();e.dataTransfer.dropEffect="move";setOverCell(`${di}_${slot.id}`);}:undefined}
+                          onDragLeave={canEdit?()=>setOverCell(c=>c===`${di}_${slot.id}`?null:c):undefined}
+                          onDrop={canEdit?e=>{if(!dragRef.current)return;e.preventDefault();dropOn(di,slot.id);}:undefined}
+                          onClick={()=>{if(canEdit&&!selectMode&&cells.length===0)onCellClick(selWeek,di,slot.id);}}>
                           {cells.map(chip)}
                           {addBtn(di,slot,cells.length?`Add another session, ${DAYS[di]} ${slot.short}`:`Add a session, ${DAYS[di]} ${slot.short}`)}
                         </td>
@@ -1741,8 +1812,10 @@ function InstructorTab({state,onApptClick}) {
 // ═══════════════════════════════════════════════════════════════════
 //  CONFLICTS TAB
 // ═══════════════════════════════════════════════════════════════════
-function ConflictsTab({conflicts,state,onApptClick}) {
+function ConflictsTab({conflicts,state,onApptClick,onFix}) {
   const {instructors,rooms,courses,slots}=state;
+  const [fixKey,setFixKey]=useState(null);
+  const [fixWho,setFixWho]=useState(0);
   if(!conflicts.length) return (
     <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
       flex:1,minHeight:0,gap:12}}>
@@ -1785,6 +1858,32 @@ function ConflictsTab({conflicts,state,onApptClick}) {
                     );
                   })}
                 </div>
+                {!c.overridden&&onFix&&(()=>{
+                  const key=`${c.a.id}|${c.b.id}|${c.type}`, open=fixKey===key;
+                  const who=[c.a,c.b][fixWho]||c.a;
+                  const fixes=open?suggestFixes(state,who):null;
+                  const list=fixes?(c.type==="room"?[...fixes.rooms,...fixes.moves]:fixes.moves):[];
+                  return (
+                    <div style={{marginTop:8}}>
+                      <Btn variant="outline" size="xs" onClick={()=>{setFixKey(open?null:key);setFixWho(0);}} aria-expanded={open}>{open?"Hide suggestions":"Suggest a fix"}</Btn>
+                      {open&&(
+                        <div style={{marginTop:8,padding:10,border:"1px solid var(--border2)",borderRadius:"var(--r)",background:"var(--bg3)"}}>
+                          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8,alignItems:"center",fontSize:13}}>
+                            <span style={{color:"var(--muted)"}}>Move</span>
+                            {[c.a,c.b].map((x,k)=><button key={k} type="button" className={`btn xs ${fixWho===k?"accent":"outline"}`} onClick={()=>setFixWho(k)}>{x.courseCode||x.courseName}{x.section?` §${x.section}`:""}</button>)}
+                          </div>
+                          {list.length===0&&<div style={{fontSize:13,color:"var(--muted)"}}>Nothing in this week fits without a new clash. Try the other session, or move it to another week from the session editor.</div>}
+                          {list.map((f,k)=>(
+                            <div key={k} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderTop:k?"1px solid var(--border)":"none"}}>
+                              <span style={{fontSize:13,flex:1}}>{f.kind==="room"?"Use room ":"Move to "}<b>{f.label}</b></span>
+                              <Btn variant="primary" size="xs" onClick={()=>{onFix(who.id,f.changes,f.kind==="room"?`room ${f.label}`:f.label);setFixKey(null);}}>Apply</Btn>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             );
           };
@@ -1821,15 +1920,12 @@ function ConflictsTab({conflicts,state,onApptClick}) {
 // ═══════════════════════════════════════════════════════════════════
 //  CHANGELOG TAB
 // ═══════════════════════════════════════════════════════════════════
-function ChangelogTab({log}) {
-  if(!log.length) return (
-    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",color:"var(--muted2)",fontSize:13}}>
-      No activity yet
-    </div>
-  );
+function ChangelogTab({log,versions,canEdit,onRestore,termName}) {
   return (
-    <div style={{padding:16,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",height:"100%"}}>
-      <div style={{fontSize:14,fontWeight:600,marginBottom:12}}>Activity Log</div>
+    <div style={{padding:16,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",flex:1}}>
+      <VersionsPanel versions={versions} canEdit={canEdit} onRestore={onRestore} defaultName={termName}/>
+      <h2 style={{fontSize:15,fontWeight:700,marginBottom:12}}>Activity log</h2>
+      {!log.length&&<div style={{fontSize:14,color:"var(--muted2)"}}>No activity yet</div>}
       {[...log].reverse().map((e,i)=>(
         <div key={i} style={{display:"flex",gap:10,marginBottom:8,paddingBottom:8,
           borderBottom:"1px solid var(--border)"}}>
@@ -1898,7 +1994,7 @@ function SettingsTab({state,setState,toast}) {
         if(!data||typeof data!=="object") throw new Error("bad file");
         const have=Object.keys(state.appointments||{}).length+state.courses.length;
         if(have&&!await askConfirm({title:"Replace this term's data?",message:"Importing replaces everything in this term with the contents of the file.",detail:`Now: ${Object.keys(state.appointments||{}).length} sessions and ${state.courses.length} courses. In the file: ${Object.keys(data.appointments||{}).length} sessions and ${(data.courses||[]).length} courses. You can undo it afterwards.`,confirmLabel:"Replace data"})) return;
-        setState({...data,settings:{...data.settings,semester:state.settings.semester||data.settings?.semester||""}}); // the term keeps its own name
+        setState({...data,settings:{...data.settings,semester:state.settings.semester||data.settings?.semester||""}},"imported data"); // the term keeps its own name
         toast("Data imported successfully. You can undo it.","ok");
       } catch { toast("Invalid file format","error"); }
     };
@@ -1995,7 +2091,8 @@ function useAuth() {
     setUser(u && !u.isAnonymous ? u : null);
     setLoading(false);
   }), []);
-  return { user, authUid, loading };
+  const refreshUser = useCallback(() => { const u = currentUser(); setAuthUid(u?.uid || null); setUser(u && !u.isAnonymous ? { ...u } : null); }, []);
+  return { user, authUid, loading, refreshUser };
 }
 
 const readName = () => { try { return localStorage.getItem("kronos_user") || ""; } catch { return ""; } };
@@ -2006,7 +2103,7 @@ const writeName = n => { try { localStorage.setItem("kronos_user", n); } catch {
 // ═══════════════════════════════════════════════════════════════════
 export default function TimetableBuilder() { return <ConfirmProvider><Builder /></ConfirmProvider>; }
 function Builder() {
-  const { user, authUid, loading: authLoading } = useAuth();
+  const { user, authUid, loading: authLoading, refreshUser } = useAuth();
   const theme = useTheme();
   const [joinLinkCode] = useState(() => codeFromSearch(typeof window !== "undefined" ? window.location.search : ""));
   const [skipAuth, setSkipAuth] = useState(!!joinLinkCode);
@@ -2042,8 +2139,20 @@ function Builder() {
     return true;
   }, [commit]);
 
+  const versionsRef = useRef({ autoSave() {} });
   const collab = useCollaboration({ getState: () => stateRef.current, applyRemote, toast: toast.push, sanitize: sanitizeState, backup: backupLocalState });
   const { session, canEdit } = collab;
+  const versions = useVersions({ rid: session?.rid || null, who: user?.displayName || userName, canEdit });
+  versionsRef.current = versions;
+  const versionsApi = { ...versions, saveNow: name => versions.save(stateRef.current, { name }) };
+  async function restoreVersion(v) {
+    let next;
+    try { next = stateFromVersion(v, stateRef.current); } catch { return "This version is damaged and can't be restored."; }
+    await versions.save(stateRef.current, { name: `Before restoring “${v.name}”`, kind: "auto" });
+    setState(next, "restored version", v.name);
+    toast.push(`Restored “${v.name}”. You can undo it.`, "ok");
+    return "";
+  }
 
   // Viewers can't change the timetable, whatever the UI does.
   const canEditRef = useRef(true);
@@ -2062,6 +2171,7 @@ function Builder() {
     commit(next);
     collab.pushDiff(prev, next, opType, opDetail);
     const changes = changesBetween(prev, next);
+    if ((changes.length >= 25 || opType === "cleared term") && (Object.keys(prev.appointments || {}).length || (prev.courses || []).length)) versionsRef.current.autoSave(prev, `Before ${opType || "a big change"}`); // a safety copy of what is about to be replaced
     if (changes.length) {
       undoStack.current = [...undoStack.current, { changes, label: opType || "change" }].slice(-MAX_HISTORY);
       redoStack.current = [];
@@ -2124,6 +2234,10 @@ function Builder() {
     setTermList([...byCode.values()].sort((a, b) => (b.at || 0) - (a.at || 0)));
   }, [user?.uid]);
   useEffect(() => { refreshTerms(); }, [refreshTerms, session?.code, session?.archived, session?.roomName]);
+  useEffect(() => { // signing in: the terms this browser already knows go into the account too, so any device can list them
+    if (!user) return;
+    loadRecentRooms().forEach(t => { if (t.code) saveMyTerm(user.uid, { code: t.code, name: t.name || "", role: t.role || "", archived: !!t.archived, at: t.at || Date.now() }).catch(() => {}); });
+  }, [user?.uid]);
   useEffect(() => { // remember the open term in the account so any device can list it
     if (user && session && session.code) saveMyTerm(user.uid, { code: session.code, name: session.roomName || "", role: session.role, archived: !!session.archived, at: Date.now() }).catch(() => {});
   }, [user?.uid, session?.code, session?.roomName, session?.role, session?.archived]);
@@ -2143,6 +2257,33 @@ function Builder() {
     setModal(null);
   }
 
+  async function moveSessions(moves, what) {
+    const cur = stateRef.current;
+    const plan = planMoves(cur, moves, { maxDay: Object.values(cur.appointments || {}).some(a => a && a.dayIdx >= 5) ? 5 : 4 });
+    if (!plan.moved.length) { toast.push(plan.blocked.length ? `Nothing moved: ${plan.blocked[0].reason}` : "Nothing to move", "warn"); return; }
+    if (plan.newClashes > 0 && !await askConfirm({ title: "This creates new clashes", message: `Moving ${what} causes ${plan.newClashes} new clash${plan.newClashes === 1 ? "" : "es"}.`, detail: "You can undo the move, and fix the clashes from the Conflicts tab.", confirmLabel: "Move anyway", danger: false })) return;
+    setState(s => ({ ...s, appointments: { ...s.appointments, ...Object.fromEntries(plan.moved.map(id => [id, plan.appointments[id]])) },
+      changelog: [...s.changelog.slice(-199), { at: Date.now(), action: "Sessions moved", detail: `${what}${plan.moved.length > 1 ? ` (${plan.moved.length})` : ""}` }] }), "moved sessions", what);
+    toast.push(`Moved ${plan.moved.length} session${plan.moved.length === 1 ? "" : "s"}${plan.blocked.length ? `; ${plan.blocked.length} couldn't move (${plan.blocked[0].reason})` : ""}. You can undo it.`, plan.blocked.length ? "warn" : "ok");
+  }
+  async function deleteSessions(ids) {
+    if (!ids.length) return false;
+    if (!await askConfirm({ title: `Delete ${ids.length} session${ids.length === 1 ? "" : "s"}?`, message: "They will be removed from the timetable, together with their comments.", detail: "You can undo the delete, but comments can't be brought back.", confirmLabel: `Delete ${ids.length}` })) return false;
+    setState(s => { const a = { ...s.appointments }; ids.forEach(id => delete a[id]);
+      return { ...s, appointments: a, changelog: [...s.changelog.slice(-199), { at: Date.now(), action: "Sessions deleted", detail: `${ids.length} sessions` }] };
+    }, "deleted sessions", `${ids.length} sessions`);
+    ids.forEach(id => collab.commentApi.removeForAppt(id));
+    toast.push(`${ids.length} session${ids.length === 1 ? "" : "s"} deleted`, "warn");
+    return true;
+  }
+  function handleFix(id, changes, label) {
+    const appt = stateRef.current.appointments[id];
+    if (!appt) return;
+    setState(s => { const next = { ...s.appointments[id], ...changes }; Object.keys(next).forEach(k => next[k] === undefined && delete next[k]);
+      return { ...s, appointments: { ...s.appointments, [id]: next }, changelog: [...s.changelog.slice(-199), { at: Date.now(), action: "Clash fixed", detail: `${appt.courseCode || appt.courseName} → ${label}` }] };
+    }, "fixed clash", appt.courseCode || appt.courseName);
+    toast.push(`Moved ${appt.courseCode || appt.courseName} to ${label}. You can undo it.`, "ok");
+  }
   function handleApptDelete(id) {
     const appt = stateRef.current.appointments[id];
     setState(s => { const a = { ...s.appointments }; delete a[id];
@@ -2153,7 +2294,11 @@ function Builder() {
   }
 
   async function handleSignIn() {
-    try { await signInWithGoogle(); }
+    try {
+      const res = await linkWithGoogle();
+      refreshUser(); // linking keeps the same identity, so the sign-in listener doesn't fire
+      if (res.linked) toast.push("Signed in. Your admin access and terms now follow your Google account, on any device.", "ok", 7000);
+    }
     catch (e) { const x = explainAuthError(e); if (!x.silent) toast.push(x.message, "warn", 10000); }
   }
   async function handleSignOut() {
@@ -2294,16 +2439,17 @@ function Builder() {
             <RoomBar session={session} presence={collab.presence} syncing={collab.syncing} lastSyncAt={collab.lastSyncAt}
               onShare={() => setShowShare(true)} onLeave={handleSwitchTerm} />
           )}
+          {session && session.role === "admin" && !session.legacy && !user && !session.archived && <AdminKeepBanner session={session} onSignIn={handleSignIn} />}
           <main className="view" id="main">
-            {tab === "schedule" && <ScheduleTab state={state} onApptClick={handleApptClick} onCellClick={handleCellClick} conflicts={openConflicts} />}
+            {tab === "schedule" && <ScheduleTab state={state} onApptClick={handleApptClick} onCellClick={handleCellClick} conflicts={openConflicts} onMove={moveSessions} onDeleteMany={deleteSessions} />}
             {tab === "dashboard" && <DashboardTab state={state} conflicts={openConflicts} />}
             {tab === "autoschedule" && canEdit && <AutoScheduleTab state={state} setState={setState} toast={toast.push} />}
             {tab === "courses" && canEdit && <CoursesTab state={state} setState={setState} toast={toast.push} />}
             {tab === "assets" && canEdit && <AssetsTab state={state} setState={setState} toast={toast.push} />}
             {tab === "instructor" && <InstructorTab state={state} onApptClick={handleApptClick} />}
-            {tab === "conflicts" && <ConflictsTab conflicts={conflicts} state={state} onApptClick={handleApptClick} />}
+            {tab === "conflicts" && <ConflictsTab conflicts={conflicts} state={state} onApptClick={handleApptClick} onFix={canEdit ? handleFix : null} />}
             {tab === "comments" && session && <CommentsTab state={state} onOpenAppt={ref => { const id = typeof ref === "string" ? ref : ref?.id; const a = (id && state.appointments[id]) || (typeof ref === "object" ? ref : null); if (a) setModal({ appt: a }); else toast.push("That session no longer exists", "warn"); }} />}
-            {tab === "changelog" && canEdit && <ChangelogTab log={state.changelog} />}
+            {tab === "changelog" && canEdit && <ChangelogTab log={state.changelog} versions={versionsApi} canEdit={canEdit} onRestore={restoreVersion} termName={state.settings.semester} />}
             {tab === "settings" && canEdit && <SettingsTab state={state} setState={setState} toast={toast.push} />}
             {tab === "activity" && session && <ActivityFeed roomCode={session.roomCode} presence={collab.presence} selfId={session.userId} />}
           </main>

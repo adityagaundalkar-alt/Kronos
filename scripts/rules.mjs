@@ -61,6 +61,16 @@ export function buildRules() {
             ".read": read(isMember),
             ".write": read(`${canEdit} && ${notArchived}`),
           },
+          // Saved versions of the timetable (a snapshot as one JSON string). Members can read them; editors and
+          // admins can save them, and delete old ones. Nobody can change a saved version or write to an archived term.
+          versions: {
+            ".read": read(isMember),
+            $vid: {
+              ".write": read(`${canEdit} && ${notArchived} && (!data.exists() || !newData.exists())`),
+              ".validate": "newData.hasChildren(['name','at','data']) && newData.child('name').isString() && newData.child('name').val().length <= 120 && newData.child('data').isString() && newData.child('data').val().length <= 1500000",
+            },
+          },
+
           presence: {
             ".read": read(isMember),
             ".write": read(isMember),

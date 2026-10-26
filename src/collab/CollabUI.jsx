@@ -120,6 +120,36 @@ export function CollabModal({ onCreate, onJoin, onClose, defaultName, initialCod
 }
 
 // ═══════════════════════════ Share & access ═══════════════════════════
+/** A small text file with the codes, so losing a browser doesn't mean losing the term. */
+export function downloadCodes(termName, codes) {
+  const origin = typeof location !== "undefined" ? location.origin : "";
+  const lines = [`Kronos term: ${termName || "Shared term"}`, `Saved: ${new Date().toLocaleString("en-GB")}`, "",
+    "Keep this file private. Anyone with the admin code can manage the term.", "",
+    ...["admin", "editor", "viewer"].filter(r => codes[r]).map(r => `${r === "viewer" ? "Read-only" : r[0].toUpperCase() + r.slice(1)} code: ${codes[r]}`), "",
+    `To get back in: open ${origin}, choose "Join with a code" and enter the admin code. You become admin again on any device.`];
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/plain" }));
+  a.download = `${(termName || "kronos-term").replace(/[^\w-]+/g, "-")}-codes.txt`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+/** Shown to an admin whose rights live only in this browser. */
+export function AdminKeepBanner({ session, onSignIn }) {
+  const key = `kronos_admin_note_${session.rid}`;
+  const [hidden, setHidden] = useState(() => { try { return localStorage.getItem(key) === "1"; } catch { return false; } });
+  if (hidden) return null;
+  const hide = () => { setHidden(true); try { localStorage.setItem(key, "1"); } catch { /* private mode */ } };
+  return (
+    <div className="callout warn" role="status" style={{ margin: "8px 16px 0", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+      <span style={{ flex: 1, minWidth: 220, fontSize: 14 }}><b>You are the admin on this browser only.</b> If you clear its data you lose admin. Sign in with Google to keep it on any device, or save the codes.</span>
+      <Btn variant="primary" size="sm" onClick={onSignIn}>Sign in with Google</Btn>
+      <Btn variant="outline" size="sm" onClick={() => downloadCodes(session.roomName, { admin: session.code })}>Save admin code</Btn>
+      <Btn variant="ghost" size="sm" onClick={hide}>Not now</Btn>
+    </div>
+  );
+}
+
 export function ShareModal({ session, onClose, toast, onUpgrade, onAdminCodeChanged, onArchive }) {
   const [codes, setCodes] = useState(null);
   const [busy, setBusy] = useState("");
@@ -228,6 +258,11 @@ export function ShareModal({ session, onClose, toast, onUpgrade, onAdminCodeChan
             </section>
           );
         })}
+        {isAdmin && !session.legacy && codes && codes.admin && (
+          <div style={{ marginBottom: 12 }}>
+            <Btn variant="outline" onClick={() => downloadCodes(session.roomName, codes)}><Icon name="download" size={15} /> Save all codes as a file</Btn>
+          </div>
+        )}
         {!isAdmin && !session.legacy && codes && rows.length === 0 && <div className="empty"><p>No codes to show for your role.</p></div>}
         {session.role === "editor" && !session.legacy && <div className="callout">Only an admin can change codes or turn the read-only link off.</div>}
         {isAdmin && !session.legacy && onArchive && (
