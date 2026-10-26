@@ -7,6 +7,8 @@ import { slotRange, customLabel, timeLabel, startKey, validateCustomTimes, fromM
 import { DAYS, DAYS_FULL, WEEKS, PALETTE, ROOM_TYPES, CATEGORIES, uid, initials, getPalette, paletteById } from "./constants.js";
 import { emptyState, termFrom, sanitizeState, loadLocal, saveLocal, backupLocalState, loadRecentRooms, forgetRoom } from "./state.js";
 import { PresenceCtx, CollabCtx } from "./collab/context.js";
+import { planRepeat } from "./repeat.js";
+import { suggestFixes } from "./fixes.js";
 import { askConfirm, ConfirmProvider } from "./ui/Confirm.jsx";
 import { buildGroupTree } from "./groups.js";
 import { changesBetween, applyChanges, invert, MAX_HISTORY } from "./history.js";
@@ -35,7 +37,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
     const w=weekNum??1,d=dayIdx??0,t=timeId??slots[0]?.id;
     return {weekNum:w,dayIdx:d,timeId:t,courseId:"",instructorId:"",roomId:"",groupIds:[],section:"",notes:""};
   });
-  const [scheduleAll,setScheduleAll]=useState(false);
+  const [repeat,setRepeat]=useState({every:0,until:16});
   // "Other event": extra classes, workshops, exams - anything that is not one of the term's courses.
   const [other,setOther]=useState(()=>!!(isEdit&&!appt.courseId&&appt.courseName));
   const hasWhat=!!form.courseId||(other&&!!(form.courseName||"").trim());
@@ -80,6 +82,8 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
 
   const conflicts=useMemo(()=>checkConflicts(appointments,effective,slots,isEdit?appt.id:null),[effective,appointments,slots]);
   const blockingConflicts=conflicts.filter(c=>!overrides[c.type]);
+  // What a repeat would save, with the weeks it has to skip.
+  const plan=useMemo(()=>repeat.every>0&&!isEdit?planRepeat({appointments,slots,holidays:state.holidays,week1Start:state.week1Start},{...effective,overrides:[...new Set(conflicts.map(c=>c.type))].filter(t=>overrides[t])},{every:repeat.every,until:Math.max(repeat.until,form.weekNum),newId:uid}):null,[repeat,effective,appointments,slots,overrides,conflicts,isEdit,state.holidays,state.week1Start,form.weekNum]);
 
   function handleSave() {
     if(!hasWhat||form.weekNum===undefined) return;
@@ -93,11 +97,10 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
     const kept=[...new Set(conflicts.map(c=>c.type))].filter(t=>overrides[t]);
     if(kept.length) base.overrides=kept; else delete base.overrides;
     const toSave=[];
-    if(scheduleAll&&!isEdit) {
-      WEEKS.filter(w=>w.n>0).forEach(w=>{
-        const wConflicts=checkConflicts(appointments,{...base,weekNum:w.n},slots);
-        if(!wConflicts.length) toSave.push({...base,id:uid(),weekNum:w.n});
-      });
+    if(repeat.every>0&&!isEdit) {
+      const real=planRepeat({appointments,slots,holidays:state.holidays,week1Start:state.week1Start},base,{every:repeat.every,until:Math.max(repeat.until,form.weekNum),newId:uid});
+      toSave.push(...real.toSave);
+      if(!toSave.length) return;
     } else {
       toSave.push(isEdit?{...base,id:appt.id}:{...base,id:uid()});
     }
@@ -256,14 +259,33 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
           <span style={{fontSize:14}}><b>Pin this session</b><span style={{display:"block",color:"var(--muted)",fontSize:14}}>Auto-schedule won't move or remove it.</span></span>
         </label>
 
-        {/* Schedule All */}
+        {/* Repeat */}
         {!isEdit&&(
-          <label style={{display:"flex",alignItems:"center",gap:8,marginBottom:16,cursor:"pointer",
-            padding:"8px 10px",borderRadius:"var(--r)",background:"var(--bg3)",
-            border:"1px solid var(--border)"}}>
-            <input type="checkbox" checked={scheduleAll} onChange={e=>setScheduleAll(e.target.checked)}/>
-            <span style={{fontSize:14,color:"var(--text)"}}>Repeat in every week (skips weeks with clashes)</span>
-          </label>
+          <div style={{marginBottom:16,padding:"10px 12px",borderRadius:"var(--r)",background:"var(--bg3)",border:"1px solid var(--border)"}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+              <label htmlFor="rep-every" style={{fontSize:14,fontWeight:600}}>Repeat</label>
+              <select id="rep-every" value={repeat.every} onChange={e=>setRepeat(r=>({...r,every:+e.target.value}))} style={{width:"auto"}}>
+                <option value={0}>Does not repeat</option>
+                <option value={1}>Every week</option>
+                <option value={2}>Every 2 weeks</option>
+                <option value={3}>Every 3 weeks</option>
+                <option value={4}>Every 4 weeks</option>
+              </select>
+              {repeat.every>0&&<>
+                <label htmlFor="rep-until" style={{fontSize:14}}>until</label>
+                <select id="rep-until" value={Math.max(repeat.until,form.weekNum)} onChange={e=>setRepeat(r=>({...r,until:+e.target.value}))} style={{width:"auto"}}>
+                  {WEEKS.filter(w=>w.n>=form.weekNum&&w.n>0).map(w=><option key={w.n} value={w.n}>{w.label}</option>)}
+                </select>
+              </>}
+            </div>
+            {plan&&(
+              <div role="status" style={{fontSize:13,color:"var(--muted)",marginTop:8}}>
+                {plan.toSave.length?`Will add ${plan.toSave.length} session${plan.toSave.length===1?"":"s"}: ${plan.toSave.map(a=>WEEKS.find(w=>w.n===a.weekNum)?.short).join(", ")}.`:"Nothing can be added with these settings."}
+                {plan.holiday.length>0&&` Skipping holidays: ${plan.holiday.map(w=>`W${w}`).join(", ")}.`}
+                {plan.clash.length>0&&` Skipping clashes: ${plan.clash.map(w=>`W${w}`).join(", ")}.`}
+              </div>
+            )}
+          </div>
         )}
         </fieldset>
 
@@ -1741,8 +1763,10 @@ function InstructorTab({state,onApptClick}) {
 // ═══════════════════════════════════════════════════════════════════
 //  CONFLICTS TAB
 // ═══════════════════════════════════════════════════════════════════
-function ConflictsTab({conflicts,state,onApptClick}) {
+function ConflictsTab({conflicts,state,onApptClick,onFix}) {
   const {instructors,rooms,courses,slots}=state;
+  const [fixKey,setFixKey]=useState(null);
+  const [fixWho,setFixWho]=useState(0);
   if(!conflicts.length) return (
     <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
       flex:1,minHeight:0,gap:12}}>
@@ -1785,6 +1809,32 @@ function ConflictsTab({conflicts,state,onApptClick}) {
                     );
                   })}
                 </div>
+                {!c.overridden&&onFix&&(()=>{
+                  const key=`${c.a.id}|${c.b.id}|${c.type}`, open=fixKey===key;
+                  const who=[c.a,c.b][fixWho]||c.a;
+                  const fixes=open?suggestFixes(state,who):null;
+                  const list=fixes?(c.type==="room"?[...fixes.rooms,...fixes.moves]:fixes.moves):[];
+                  return (
+                    <div style={{marginTop:8}}>
+                      <Btn variant="outline" size="xs" onClick={()=>{setFixKey(open?null:key);setFixWho(0);}} aria-expanded={open}>{open?"Hide suggestions":"Suggest a fix"}</Btn>
+                      {open&&(
+                        <div style={{marginTop:8,padding:10,border:"1px solid var(--border2)",borderRadius:"var(--r)",background:"var(--bg3)"}}>
+                          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8,alignItems:"center",fontSize:13}}>
+                            <span style={{color:"var(--muted)"}}>Move</span>
+                            {[c.a,c.b].map((x,k)=><button key={k} type="button" className={`btn xs ${fixWho===k?"accent":"outline"}`} onClick={()=>setFixWho(k)}>{x.courseCode||x.courseName}{x.section?` §${x.section}`:""}</button>)}
+                          </div>
+                          {list.length===0&&<div style={{fontSize:13,color:"var(--muted)"}}>Nothing in this week fits without a new clash. Try the other session, or move it to another week from the session editor.</div>}
+                          {list.map((f,k)=>(
+                            <div key={k} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderTop:k?"1px solid var(--border)":"none"}}>
+                              <span style={{fontSize:13,flex:1}}>{f.kind==="room"?"Use room ":"Move to "}<b>{f.label}</b></span>
+                              <Btn variant="primary" size="xs" onClick={()=>{onFix(who.id,f.changes,f.kind==="room"?`room ${f.label}`:f.label);setFixKey(null);}}>Apply</Btn>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             );
           };
@@ -2143,6 +2193,14 @@ function Builder() {
     setModal(null);
   }
 
+  function handleFix(id, changes, label) {
+    const appt = stateRef.current.appointments[id];
+    if (!appt) return;
+    setState(s => { const next = { ...s.appointments[id], ...changes }; Object.keys(next).forEach(k => next[k] === undefined && delete next[k]);
+      return { ...s, appointments: { ...s.appointments, [id]: next }, changelog: [...s.changelog.slice(-199), { at: Date.now(), action: "Clash fixed", detail: `${appt.courseCode || appt.courseName} → ${label}` }] };
+    }, "fixed clash", appt.courseCode || appt.courseName);
+    toast.push(`Moved ${appt.courseCode || appt.courseName} to ${label}. You can undo it.`, "ok");
+  }
   function handleApptDelete(id) {
     const appt = stateRef.current.appointments[id];
     setState(s => { const a = { ...s.appointments }; delete a[id];
@@ -2301,7 +2359,7 @@ function Builder() {
             {tab === "courses" && canEdit && <CoursesTab state={state} setState={setState} toast={toast.push} />}
             {tab === "assets" && canEdit && <AssetsTab state={state} setState={setState} toast={toast.push} />}
             {tab === "instructor" && <InstructorTab state={state} onApptClick={handleApptClick} />}
-            {tab === "conflicts" && <ConflictsTab conflicts={conflicts} state={state} onApptClick={handleApptClick} />}
+            {tab === "conflicts" && <ConflictsTab conflicts={conflicts} state={state} onApptClick={handleApptClick} onFix={canEdit ? handleFix : null} />}
             {tab === "comments" && session && <CommentsTab state={state} onOpenAppt={ref => { const id = typeof ref === "string" ? ref : ref?.id; const a = (id && state.appointments[id]) || (typeof ref === "object" ? ref : null); if (a) setModal({ appt: a }); else toast.push("That session no longer exists", "warn"); }} />}
             {tab === "changelog" && canEdit && <ChangelogTab log={state.changelog} />}
             {tab === "settings" && canEdit && <SettingsTab state={state} setState={setState} toast={toast.push} />}
