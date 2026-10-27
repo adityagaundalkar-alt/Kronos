@@ -324,6 +324,7 @@ export function runAutoSchedule(state, jobs, { makeId = randomId } = {}) {
 
     const placed = [];
     const missing = [];
+    const pickMisses = [];
     const usedDaysByWeek = new Map(weeks.map(w => [w, new Set()]));
     let lastRoom = null;
 
@@ -353,7 +354,14 @@ export function runAutoSchedule(state, jobs, { makeId = randomId } = {}) {
       for (const w of weeks) {
         const used = usedDaysByWeek.get(w);
         let appt = null;
-        if (pattern && !used.has(pattern.dayIdx)) {
+        const pick = job.picks?.[w]?.[k];
+        if (pick && !used.has(pick.dayIdx)) { // a time the person chose for this week
+          const ev = evaluate(ctx, w, pick.dayIdx, pick.timeId);
+          if (ev.ok) appt = commitSession(ctx, w, pick.dayIdx, pick.timeId, ev.freeRooms, lastRoom, makeId, course);
+          else pickMisses.push({ weekNum: w, sessionIndex: k, dayIdx: pick.dayIdx, timeId: pick.timeId, reasons: ev.reasons });
+        }
+        if (appt) { /* placed at the chosen time */ }
+        else if (pattern && !used.has(pattern.dayIdx)) {
           const ev = evaluate(ctx, w, pattern.dayIdx, pattern.timeId);
           if (ev.ok) appt = commitSession(ctx, w, pattern.dayIdx, pattern.timeId, ev.freeRooms, lastRoom, makeId, course);
           else if (mode === "strict") {
@@ -402,6 +410,7 @@ export function runAutoSchedule(state, jobs, { makeId = randomId } = {}) {
 
     report.placed = placed;
     report.missing = missing;
+    report.pickMisses = pickMisses;
     report.holidayWeeks = missing.filter(m => m.holiday).length;
     const expected = weeks.length * perWeek;
     report.status = !placed.length ? "none" : placed.length + report.holidayWeeks >= expected ? "full" : "partial";
@@ -445,4 +454,35 @@ export function slotMatrix(state, job) {
     cells[key] = { status, freeWeeks: free, weeks: weeks.length, holidays, reasons: [...tally].sort((a, b) => b[1] - a[1]).map(([code, n]) => ({ code, count: n })) };
   }
   return { cells, feasible, needed: ctx.needed };
+}
+
+/**
+ * Every time the job could use, week by week, for the "choose a time" panel.
+ * Returns { weeks, options: [{ dayIdx, timeId, freeWeeks, blocked: [{ weekNum, holiday, codes }], rooms: [names free in every free week],
+ * byWeek: { [week]: { ok, rooms: [names], load } } }] }. `load` = other classes those groups already have that day.
+ */
+export function slotOptions(state, job) {
+  const index = makeIndex(state.appointments);
+  const ctx = makeContext(state, job, index);
+  const weeks = jobWeeks(job);
+  const wanted = (job.groupIds || []).filter(Boolean);
+  const options = [];
+  for (const c of candidateSlots(job, ctx.instructor, ctx.slots)) {
+    if (!c.available) continue;
+    const byWeek = {}, blocked = [];
+    let free = 0, roomsAll = null;
+    for (const w of weeks) {
+      const ev = evaluate(ctx, w, c.dayIdx, c.timeId);
+      const load = wanted.length ? index.day(w, c.dayIdx).filter(a => !siblingSection(job, a) && (a.groupIds || []).some(g => wanted.includes(g))).length : 0;
+      const rooms = ev.ok ? ev.freeRooms.map(r => r.name) : [];
+      byWeek[w] = { ok: ev.ok, rooms, load };
+      if (ev.ok) { free++; roomsAll = roomsAll ? roomsAll.filter(n => rooms.includes(n)) : rooms; }
+      else blocked.push({ weekNum: w, holiday: ev.reasons.length === 1 && ev.reasons[0].code === "holiday", codes: ev.reasons.map(r => r.code) });
+    }
+    if (!free) continue;
+    const loads = weeks.filter(w => byWeek[w].ok).map(w => byWeek[w].load);
+    options.push({ dayIdx: c.dayIdx, timeId: c.timeId, freeWeeks: free, blocked, rooms: roomsAll || [], avgLoad: loads.reduce((a, b) => a + b, 0) / loads.length, byWeek });
+  }
+  options.sort((a, b) => b.freeWeeks - a.freeWeeks || a.avgLoad - b.avgLoad || a.dayIdx - b.dayIdx);
+  return { weeks, options };
 }

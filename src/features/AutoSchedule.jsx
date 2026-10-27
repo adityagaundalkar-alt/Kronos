@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import { DAYS as ALL_DAYS, DAYS_FULL, uid, ROOM_TYPES, getPalette } from "../constants.js";
 const DAYS = ALL_DAYS.slice(0, DAY_COUNT); // the auto-scheduler places sessions Monday to Friday
-import { DAY_COUNT, runAutoSchedule, slotMatrix, jobWeeks, seatsNeeded, reasonText, ALL_WEEKS } from "../scheduler.js";
+import { DAY_COUNT, runAutoSchedule, slotMatrix, slotOptions, jobWeeks, seatsNeeded, reasonText, ALL_WEEKS } from "../scheduler.js";
 import { Btn, Badge, Field, Segmented, EmptyState } from "../ui/kit.jsx";
 import Icon from "../ui/Icon.jsx";
 import { askConfirm } from "../ui/Confirm.jsx";
@@ -17,7 +17,7 @@ const MODES = [
 ];
 
 const blankJob = () => ({
-  id: uid(), courseId: "", custom: false, customTitle: "", customCode: "", sectionId: "", sectionName: "", instructorId: "", groupIds: [], roomId: "", preferRoomType: "", ignoreCapacity: false,
+  id: uid(), courseId: "", custom: false, customTitle: "", customCode: "", picks: {}, sectionId: "", sectionName: "", instructorId: "", groupIds: [], roomId: "", preferRoomType: "", ignoreCapacity: false,
   weeksMode: "all", weekStart: 1, weekEnd: 16, customWeeks: [], sessionsPerWeek: 1, mode: "prefer",
   useInstructorAvailability: true, preferDays: [], preferSlots: [], avoidSlots: [], replaceExisting: false, requireAll: false, _open: true,
 });
@@ -37,6 +37,104 @@ function Chips({ options, value, onChange, label }) {
   );
 }
 
+const roomsText = r => !r.length ? "a room is free each week, but not the same one" : r.length <= 3 ? r.join(", ") : `${r.slice(0, 3).join(", ")} +${r.length - 3}`;
+const blockedText = b => {
+  const shown = b.slice(0, 4).map(x => `W${x.weekNum} ${x.holiday ? "holiday" : x.codes.map(reasonText).join(", ")}`).join("; ");
+  return b.length > 4 ? `${shown}; +${b.length - 4} more` : shown;
+};
+
+/** Lets the person pick the time(s) instead of leaving it to the scheduler, for all weeks or one week at a time. */
+function TimePicker({ job, state, onUpdate }) {
+  const { slots, groups } = state;
+  const opts = useMemo(() => (job.courseId || job.custom) ? slotOptions(state, toEngine(job)) : null,
+    [job, state.appointments, state.instructors, state.rooms, state.groups, state.holidays, state.slots, state.week1Start]);
+  if (!opts) return null;
+  const perWeek = Math.min(Math.max(Number(job.sessionsPerWeek) || 1, 1), 5);
+  const picks = job.picks || {};
+  const slotName = id => slots.find(x => x.id === id)?.short || id;
+  const nm = (d, t) => `${DAYS[d]} ${slotName(t)}`;
+  const count = Object.values(picks).reduce((n, a) => n + (a || []).filter(Boolean).length, 0);
+  const setPick = (w, k, val) => {
+    const arr = [...(picks[w] || [])]; while (arr.length <= k) arr.push(null); arr[k] = val;
+    const next = { ...picks };
+    if (arr.some(Boolean)) next[w] = arr; else delete next[w];
+    onUpdate({ picks: next });
+  };
+  const applyToWeeks = (o, k) => {
+    const next = { ...picks };
+    opts.weeks.forEach(w => {
+      if (!o.byWeek[w].ok) return;
+      const arr = [...(next[w] || [])]; while (arr.length <= k) arr.push(null); arr[k] = { dayIdx: o.dayIdx, timeId: o.timeId }; next[w] = arr;
+    });
+    onUpdate({ picks: next });
+  };
+  const chosenAll = (o, k) => opts.weeks.filter(w => o.byWeek[w].ok).every(w => { const p = picks[w]?.[k]; return p && p.dayIdx === o.dayIdx && p.timeId === o.timeId; });
+  const wantsLoad = (job.groupIds || []).length > 0;
+  return (
+    <details style={{ background: "var(--bg3)", border: "1px solid var(--border)", borderRadius: "var(--r)", padding: "8px 12px", marginBottom: 12 }}>
+      <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: 14, padding: "2px 0" }}>
+        Choose the times yourself{count ? ` (${count} chosen)` : ""}
+      </summary>
+      <div style={{ fontSize: 13, color: "var(--muted)", margin: "6px 0 10px" }}>
+        Optional. Anything you don't choose is placed automatically. A chosen time that turns out to be taken is replaced, and the result tells you.
+      </div>
+      {!opts.options.length && <div className="callout info">No time is free in any of these weeks. Change the weeks, groups or instructor.</div>}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 280, overflowY: "auto", minHeight: 0 }}>
+        {opts.options.map(o => (
+          <div key={`${o.dayIdx}_${o.timeId}`} style={{ border: "1px solid var(--border)", borderRadius: "var(--r)", padding: "8px 10px", background: "var(--bg2)", flexShrink: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <strong style={{ fontSize: 14 }}>{DAYS_FULL[o.dayIdx]} {slotName(o.timeId)}</strong>
+              <span style={{ fontSize: 12.5, color: "var(--muted)" }}>{slots.find(x => x.id === o.timeId)?.label}</span>
+              <Badge color={o.blocked.length ? "yellow" : "green"}>{o.freeWeeks} of {opts.weeks.length} weeks free</Badge>
+              <span style={{ marginLeft: "auto", display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {Array.from({ length: perWeek }, (_, k) => (
+                  <Btn key={k} variant={chosenAll(o, k) ? "primary" : "outline"} onClick={() => applyToWeeks(o, k)}>
+                    {chosenAll(o, k) ? "Chosen" : perWeek > 1 ? `Use for session ${k + 1}` : "Use every week"}
+                  </Btn>
+                ))}
+              </span>
+            </div>
+            <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 4, lineHeight: 1.45 }}>
+              Rooms: {roomsText(o.rooms)}
+              {wantsLoad && <> · Groups have {Math.round(o.avgLoad * 10) / 10} other class{Math.round(o.avgLoad * 10) / 10 === 1 ? "" : "es"} that day</>}
+              {o.blocked.length > 0 && <><br />Blocked: {blockedText(o.blocked)}</>}
+            </div>
+          </div>
+        ))}
+      </div>
+      {opts.options.length > 0 && (
+        <details style={{ marginTop: 10 }}>
+          <summary style={{ cursor: "pointer", fontSize: 14, fontWeight: 600 }}>Adjust week by week</summary>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: "6px 12px", marginTop: 8 }}>
+            {opts.weeks.map(w => (
+              <div key={w} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {Array.from({ length: perWeek }, (_, k) => {
+                  const cur = picks[w]?.[k];
+                  const here = opts.options.filter(o => o.byWeek[w].ok);
+                  const stale = cur && !here.some(o => o.dayIdx === cur.dayIdx && o.timeId === cur.timeId);
+                  return (
+                    <label key={k} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+                      <span style={{ width: perWeek > 1 ? 74 : 34, flexShrink: 0, color: "var(--muted)", font: "600 12px var(--mono)" }}>W{w}{perWeek > 1 ? ` · ${k + 1}` : ""}</span>
+                      <select aria-label={`Week ${w}${perWeek > 1 ? `, session ${k + 1}` : ""}`} value={cur ? `${cur.dayIdx}_${cur.timeId}` : ""}
+                        onChange={e => { const v = e.target.value; if (!v) setPick(w, k, null); else { const [d, t] = v.split("_"); setPick(w, k, { dayIdx: +d, timeId: t }); } }}>
+                        <option value="">Automatic</option>
+                        {stale && <option value={`${cur.dayIdx}_${cur.timeId}`}>{nm(cur.dayIdx, cur.timeId)} (taken)</option>}
+                        {here.map(o => <option key={`${o.dayIdx}_${o.timeId}`} value={`${o.dayIdx}_${o.timeId}`}>
+                          {nm(o.dayIdx, o.timeId)} · {roomsText(o.byWeek[w].rooms.slice(0, 2))}{wantsLoad ? ` · ${o.byWeek[w].load} other` : ""}</option>)}
+                      </select>
+                    </label>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+      {count > 0 && <div style={{ marginTop: 10 }}><Btn variant="ghost" onClick={() => onUpdate({ picks: {} })}>Clear my choices</Btn></div>}
+    </details>
+  );
+}
+
 function JobCard({ job, ji, state, onUpdate, onRemove, onToggle, onInstructorAvailability, onSplit }) {
   const { courses, instructors, groups, rooms, slots } = state;
   const course = courses.find(c => c.id === job.courseId);
@@ -50,8 +148,8 @@ function JobCard({ job, ji, state, onUpdate, onRemove, onToggle, onInstructorAva
 
   function pickCourse(courseId) {
     const c = courses.find(x => x.id === courseId);
-    if (courseId === "__other") { onUpdate({ courseId: "", custom: true, instructorId: "", groupIds: [], sectionId: "", sectionName: "" }); return; }
-    onUpdate({ courseId, custom: false, sectionId: "", sectionName: "", instructorId: c?.defaultInstructorId || "", groupIds: c?.defaultGroupIds || [] });
+    if (courseId === "__other") { onUpdate({ courseId: "", custom: true, picks: {}, instructorId: "", groupIds: [], sectionId: "", sectionName: "" }); return; }
+    onUpdate({ courseId, custom: false, picks: {}, sectionId: "", sectionName: "", instructorId: c?.defaultInstructorId || "", groupIds: c?.defaultGroupIds || [] });
   }
   function pickSection(id) {
     const sc = secs.find(x => x.id === id);
@@ -190,6 +288,8 @@ function JobCard({ job, ji, state, onUpdate, onRemove, onToggle, onInstructorAva
             )}
           </fieldset>
 
+          <TimePicker job={job} state={state} onUpdate={onUpdate} />
+
           {matrix && (
             <div style={{ background: "var(--bg3)", border: "1px solid var(--border)", borderRadius: "var(--r)", padding: 12, marginBottom: 12 }}>
               <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 2 }}>What's free for {weekText(weeks)}</div>
@@ -276,6 +376,11 @@ function ResultCard({ r, state, included, onInclude }) {
       {missing.length > 0 && (
         <div style={{ marginTop: 10, fontSize: 14 }}>
           <strong>Couldn't place:</strong> {[...new Set(missing.map(m => `week ${m.weekNum}`))].join(", ")}
+        </div>
+      )}
+      {(r.pickMisses || []).length > 0 && (
+        <div className="callout info" style={{ marginTop: 10 }}>
+          <strong>Some chosen times were taken:</strong> {r.pickMisses.map(m => `W${m.weekNum} ${DAYS[m.dayIdx]} ${slots.find(x => x.id === m.timeId)?.short || m.timeId} (${m.reasons.map(x => reasonText(x.code)).join(", ")})`).join("; ")}. Those weeks were placed automatically.
         </div>
       )}
       {r.explanation.length > 0 && (
