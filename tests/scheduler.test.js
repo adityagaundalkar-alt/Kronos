@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { runAutoSchedule, slotMatrix, groupDemand, seatsNeeded, candidateSlots, jobWeeks } from "../src/scheduler.js";
+import { runAutoSchedule, slotOptions, slotMatrix, groupDemand, seatsNeeded, candidateSlots, jobWeeks } from "../src/scheduler.js";
 import { getAllConflicts } from "../src/conflicts.js";
 
 const SLOTS = [
@@ -502,5 +502,37 @@ describe("parallel sections with shared groups", () => {
     const s = base({ appointments: { g1: sib("g1", "G1") } });
     const res = runAutoSchedule(s, [job({ weeks: [1], groupIds: ["a"], preferSlots: ["pm"], preferDays: [2] })], { makeId: counter });
     expect(res.scheduled.some(a => a.dayIdx === 2 && a.timeId === "pm")).toBe(false);
+  });
+});
+
+describe("choosing times", () => {
+  it("slotOptions lists free times with rooms, blocked weeks and group load", () => {
+    const s = base({ appointments: { m: appt("m", 2, 0, "am", { groupIds: ["a"] }), n: appt("n", 1, 0, "pm", { groupIds: ["a"], instructorId: "i2" }) } });
+    const { weeks, options } = slotOptions(s, job({ weeks: [1, 2, 3] }));
+    expect(weeks).toEqual([1, 2, 3]);
+    const monAm = options.find(o => o.dayIdx === 0 && o.timeId === "am");
+    expect(monAm.freeWeeks).toBe(2);
+    expect(monAm.blocked.map(b => b.weekNum)).toEqual([2]);
+    expect(monAm.byWeek[1].load).toBe(1); // Monday week 1 already has the pm class for group a
+    expect(monAm.rooms.length).toBeGreaterThan(0);
+    expect(options[0].freeWeeks).toBe(3);
+    expect(options.every(o => o.freeWeeks > 0)).toBe(true);
+  });
+  it("places sessions at the times picked for each week", () => {
+    const s = base();
+    const res = runAutoSchedule(s, [job({ weeks: [1, 2, 3], picks: { 1: [{ dayIdx: 3, timeId: "pm" }], 2: [{ dayIdx: 1, timeId: "am" }] } })], { makeId: counter });
+    const at = w => res.scheduled.find(a => a.weekNum === w);
+    expect(at(1)).toMatchObject({ dayIdx: 3, timeId: "pm" });
+    expect(at(2)).toMatchObject({ dayIdx: 1, timeId: "am" });
+    expect(at(3)).toBeTruthy(); // no pick: automatic
+    expect(res.reports[0].pickMisses).toEqual([]);
+  });
+  it("a pick that is no longer free falls back to automatic and is reported", () => {
+    const s = base({ appointments: { m: appt("m", 1, 3, "pm", { instructorId: "i1" }) } });
+    const res = runAutoSchedule(s, [job({ weeks: [1], picks: { 1: [{ dayIdx: 3, timeId: "pm" }] } })], { makeId: counter });
+    expect(res.scheduled).toHaveLength(1);
+    expect(res.scheduled[0]).not.toMatchObject({ dayIdx: 3, timeId: "pm" });
+    expect(res.reports[0].pickMisses).toHaveLength(1);
+    expect(res.reports[0].pickMisses[0].reasons[0].code).toBe("instructor-busy");
   });
 });
