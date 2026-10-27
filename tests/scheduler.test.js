@@ -483,3 +483,24 @@ describe("sections", () => {
     expect(getAllConflicts(merge(s, res).appointments, SLOTS)).toEqual([]);
   });
 });
+
+describe("parallel sections with shared groups", () => {
+  const sib = (id, sectionId, extra = {}) => appt(id, 1, 2, "pm", { courseId: "c1", courseName: "Intro CS", courseCode: "CS101", instructorId: "i2", groupIds: ["a"], sectionId, section: sectionId, roomId: "rBig", ...extra });
+  it("places a section beside its sibling even though the groups are the same", () => {
+    const s = base({ appointments: { g1: sib("g1", "G1") } });
+    const res = runAutoSchedule(s, [job({ weeks: [1], sectionId: "G2", sectionName: "G2", groupIds: ["a"], instructorId: "i1", mode: "free" })], { makeId: counter });
+    expect(res.scheduled).toHaveLength(1);
+    expect(res.scheduled[0]).toMatchObject({ dayIdx: 2, timeId: "pm" });
+    expect(getAllConflicts(merge(s, res).appointments, SLOTS)).toEqual([]);
+  });
+  it("still refuses a slot taken by a different course for those groups", () => {
+    const s = base({ appointments: { m: appt("m", 1, 2, "pm", { groupIds: ["a"] }) } });
+    const res = runAutoSchedule(s, [job({ weeks: [1], sectionId: "G2", sectionName: "G2", groupIds: ["a"], preferSlots: ["pm"], preferDays: [2] })], { makeId: counter });
+    expect(res.scheduled.some(a => a.dayIdx === 2 && a.timeId === "pm")).toBe(false);
+  });
+  it("without a section the groups still block", () => {
+    const s = base({ appointments: { g1: sib("g1", "G1") } });
+    const res = runAutoSchedule(s, [job({ weeks: [1], groupIds: ["a"], preferSlots: ["pm"], preferDays: [2] })], { makeId: counter });
+    expect(res.scheduled.some(a => a.dayIdx === 2 && a.timeId === "pm")).toBe(false);
+  });
+});
