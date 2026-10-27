@@ -7,6 +7,7 @@ import Icon from "../ui/Icon.jsx";
 import { askConfirm } from "../ui/Confirm.jsx";
 import GroupPicker from "../ui/GroupPicker.jsx";
 import SearchSelect from "../ui/SearchSelect.jsx";
+import { sectionsOf } from "../sections.js";
 import AvailabilityGrid from "./AvailabilityGrid.jsx";
 
 const MODES = [
@@ -16,7 +17,7 @@ const MODES = [
 ];
 
 const blankJob = () => ({
-  id: uid(), courseId: "", custom: false, customTitle: "", customCode: "", instructorId: "", groupIds: [], roomId: "", preferRoomType: "", ignoreCapacity: false,
+  id: uid(), courseId: "", custom: false, customTitle: "", customCode: "", sectionId: "", sectionName: "", instructorId: "", groupIds: [], roomId: "", preferRoomType: "", ignoreCapacity: false,
   weeksMode: "all", weekStart: 1, weekEnd: 16, customWeeks: [], sessionsPerWeek: 1, mode: "prefer",
   useInstructorAvailability: true, preferDays: [], preferSlots: [], avoidSlots: [], replaceExisting: false, requireAll: false, _open: true,
 });
@@ -36,10 +37,11 @@ function Chips({ options, value, onChange, label }) {
   );
 }
 
-function JobCard({ job, ji, state, onUpdate, onRemove, onToggle, onInstructorAvailability }) {
+function JobCard({ job, ji, state, onUpdate, onRemove, onToggle, onInstructorAvailability, onSplit }) {
   const { courses, instructors, groups, rooms, slots } = state;
   const course = courses.find(c => c.id === job.courseId);
   const instr = instructors.find(i => i.id === job.instructorId);
+  const secs = sectionsOf(course);
   const pal = course ? getPalette(course.id, courses) : null;
   const needed = seatsNeeded(job, groups);
   const biggest = rooms.length ? Math.max(...rooms.map(r => Number(r.capacity) || 0)) : 0;
@@ -48,8 +50,13 @@ function JobCard({ job, ji, state, onUpdate, onRemove, onToggle, onInstructorAva
 
   function pickCourse(courseId) {
     const c = courses.find(x => x.id === courseId);
-    if (courseId === "__other") { onUpdate({ courseId: "", custom: true, instructorId: "", groupIds: [] }); return; }
-    onUpdate({ courseId, custom: false, instructorId: c?.defaultInstructorId || "", groupIds: c?.defaultGroupIds || [] });
+    if (courseId === "__other") { onUpdate({ courseId: "", custom: true, instructorId: "", groupIds: [], sectionId: "", sectionName: "" }); return; }
+    onUpdate({ courseId, custom: false, sectionId: "", sectionName: "", instructorId: c?.defaultInstructorId || "", groupIds: c?.defaultGroupIds || [] });
+  }
+  function pickSection(id) {
+    const sc = secs.find(x => x.id === id);
+    if (!sc) { onUpdate({ sectionId: "", sectionName: "", instructorId: course?.defaultInstructorId || "", groupIds: course?.defaultGroupIds || [], roomId: "", preferRoomType: "" }); return; }
+    onUpdate({ sectionId: sc.id, sectionName: sc.name, instructorId: sc.instructorId || course?.defaultInstructorId || "", groupIds: sc.groupIds?.length ? sc.groupIds : (course?.defaultGroupIds || []), roomId: sc.roomId || "", preferRoomType: sc.roomType || "" });
   }
   const weeks = jobWeeks(job);
 
@@ -59,7 +66,7 @@ function JobCard({ job, ji, state, onUpdate, onRemove, onToggle, onInstructorAva
         style={{ width: "100%", padding: "12px 14px", display: "flex", alignItems: "center", gap: 10, textAlign: "left", background: job._open ? "var(--bg3)" : "transparent", borderBottom: job._open ? "1px solid var(--border)" : "none" }}>
         <span style={{ font: "600 13px var(--mono)", color: "var(--muted2)", width: 20 }}>{ji + 1}</span>
         <span style={{ fontWeight: 600, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {course ? `${course.code}  ${course.name}` : job.custom ? `${job.customCode || "EXTRA"}  ${job.customTitle || "Other event"}` : "New job: choose a course"}
+          {course ? `${course.code}${job.sectionName ? " §" + job.sectionName : ""}  ${course.name}` : job.custom ? `${job.customCode || "EXTRA"}  ${job.customTitle || "Other event"}` : "New job: choose a course"}
         </span>
         {matrix && <Badge color={matrix.feasible > 0 ? "green" : "yellow"}>{matrix.feasible > 0 ? `${matrix.feasible} time${matrix.feasible === 1 ? "" : "s"} free every week` : "No time free every week"}</Badge>}
         <Icon name={job._open ? "up" : "down"} size={16} style={{ color: "var(--muted)" }} />
@@ -71,6 +78,15 @@ function JobCard({ job, ji, state, onUpdate, onRemove, onToggle, onInstructorAva
             <Field label="Course" required>
               <SearchSelect value={job.custom ? "__other" : job.courseId} onChange={pickCourse} placeholder="Choose a course…" options={[...courses.map(c => ({ value: c.id, label: `${c.code}  ${c.name}` })), { value: "__other", label: "Other event (extra class, workshop, exam…)" }]} />
             </Field>
+            {secs.length > 0 && (
+              <Field label="Section" hint="Each section is scheduled on its own">
+                <select value={job.sectionId || ""} onChange={e => pickSection(e.target.value)}>
+                  <option value="">Whole course (no section)</option>
+                  {secs.map(sc => <option key={sc.id} value={sc.id}>{sc.name || "(unnamed)"}</option>)}
+                </select>
+                {!job.sectionId && <div style={{ marginTop: 6 }}><Btn variant="outline" size="sm" onClick={onSplit}>Add a job for every section</Btn></div>}
+              </Field>
+            )}
             {job.custom && (
               <Field label="Event title" required hint="Shown on the timetable">
                 <input value={job.customTitle} onChange={e => onUpdate({ customTitle: e.target.value })} placeholder="e.g. Extra class: Machine Learning" />
@@ -233,7 +249,7 @@ function ResultCard({ r, state, included, onInclude }) {
   return (
     <section style={{ background: "var(--bg2)", border: "1px solid var(--border2)", borderLeft: `4px solid ${pal.accent}`, borderRadius: "var(--r2)", padding: "12px 14px", flexShrink: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ font: "600 13px var(--mono)", color: pal.accent }}>{r.course?.code}</span>
+        <span style={{ font: "600 13px var(--mono)", color: pal.accent }}>{r.course?.code}{r.job.sectionName ? ` §${r.job.sectionName}` : ""}</span>
         <strong style={{ fontSize: 15 }}>{r.course?.name || "Unknown course"}</strong>
         {instrName && <span style={{ color: "var(--muted)", fontSize: 13 }}>{instrName}</span>}
         <div style={{ flex: 1 }} />
@@ -283,6 +299,14 @@ export default function AutoScheduleTab({ state, setState, toast }) {
   const [included, setIncluded] = useState({});     // job id -> bool
 
   const updateJob = (id, patch) => setJobs(j => j.map(x => x.id === id ? { ...x, ...patch } : x));
+  function splitSections(job) {
+    const c = state.courses.find(x => x.id === job.courseId);
+    const secs = sectionsOf(c);
+    if (!secs.length) return;
+    setJobs(js => js.flatMap(x => x.id !== job.id ? [x] : secs.map(sc => ({ ...x, id: uid(), sectionId: sc.id, sectionName: sc.name,
+      instructorId: sc.instructorId || c.defaultInstructorId || "", groupIds: sc.groupIds?.length ? sc.groupIds : (c.defaultGroupIds || []),
+      roomId: sc.roomId || "", preferRoomType: sc.roomType || "", _open: false }))));
+  }
   const ready = jobs.filter(j => j.courseId || (j.custom && j.customTitle.trim()));
 
   function run() {
@@ -343,7 +367,7 @@ export default function AutoScheduleTab({ state, setState, toast }) {
         {jobs.map((job, ji) => (
           <JobCard key={job.id} job={job} ji={ji} state={state} onUpdate={p => updateJob(job.id, p)}
             onRemove={() => setJobs(j => j.length > 1 ? j.filter(x => x.id !== job.id) : [blankJob()])}
-            onToggle={() => updateJob(job.id, { _open: !job._open })} onInstructorAvailability={instructorAvailability} />
+            onSplit={() => splitSections(job)} onToggle={() => updateJob(job.id, { _open: !job._open })} onInstructorAvailability={instructorAvailability} />
         ))}
       </div>
     </div>

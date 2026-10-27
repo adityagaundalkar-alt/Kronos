@@ -281,6 +281,7 @@ function commitSession(ctx, week, dayIdx, timeId, freeRooms, lastRoomId, makeId,
     courseId: job.custom ? "" : job.courseId, courseName: course.name, courseCode: course.code,
     instructorId: job.instructorId || "", roomId: room.id,
     groupIds: [...(job.groupIds || [])], notes: "",
+    ...(job.sectionId && !job.custom ? { sectionId: job.sectionId, section: job.sectionName || "" } : {}),
   };
   ctx.index.add(appt);
   return appt;
@@ -313,7 +314,7 @@ export function runAutoSchedule(state, jobs, { makeId = randomId } = {}) {
     // Replace mode: lift this course's unlocked sessions out of the way first (restored per week if nothing replaces them).
     const lifted = [];
     if (job.replaceExisting) {
-      Object.values(state.appointments || {}).filter(a => a && (job.custom ? (!a.courseId && a.courseName === course.name) : a.courseId === job.courseId) && !a.locked && weeks.includes(a.weekNum))
+      Object.values(state.appointments || {}).filter(a => a && (job.custom ? (!a.courseId && a.courseName === course.name) : (a.courseId === job.courseId && (a.sectionId || "") === (job.sectionId || ""))) && !a.locked && weeks.includes(a.weekNum))
         .forEach(a => { lifted.push(a); index.remove(a); });
     }
 

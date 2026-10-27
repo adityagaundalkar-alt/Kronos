@@ -457,3 +457,29 @@ describe("custom events (not a course)", () => {
     expect(getAllConflicts(merge(s, res).appointments, SLOTS)).toEqual([]);
   });
 });
+
+describe("sections", () => {
+  const sec = (id, sectionId, name, extra = {}) => appt(id, 1, 0, "am", { courseId: "c1", courseName: "Intro CS", courseCode: "CS101", instructorId: "i1", groupIds: ["a"], sectionId, section: name, ...extra });
+
+  it("placed sessions carry the section id and name", () => {
+    const res = runAutoSchedule(base(), [job({ weeks: [1], sectionId: "s1", sectionName: "A" })], { makeId: counter });
+    expect(res.scheduled.length).toBe(1);
+    expect(res.scheduled[0]).toMatchObject({ sectionId: "s1", section: "A", courseId: "c1" });
+  });
+  it("replace mode only lifts sessions of the same section", () => {
+    const s = base({ appointments: { x: sec("x", "s1", "A"), y: sec("y", "s2", "B", { weekNum: 1, dayIdx: 1, groupIds: ["b"], instructorId: "i2" }), z: sec("z", "", "", { weekNum: 1, dayIdx: 2 }) } });
+    const res = runAutoSchedule(s, [job({ weeks: [1], sectionId: "s1", sectionName: "A", replaceExisting: true })], { makeId: counter });
+    expect(res.removed).toEqual(["x"]);
+    const whole = runAutoSchedule(s, [job({ weeks: [1], replaceExisting: true })], { makeId: counter });
+    expect(whole.removed).toEqual(["z"]);
+  });
+  it("two sections of one course can be placed at the same time for different groups and instructors", () => {
+    const s = base();
+    const res = runAutoSchedule(s, [
+      job({ weeks: [1], sectionId: "s1", sectionName: "A", groupIds: ["a"], instructorId: "i1", preferSlots: [{ dayIdx: 0, timeId: "am" }] }),
+      job({ weeks: [1], sectionId: "s2", sectionName: "B", groupIds: ["b"], instructorId: "i2", preferSlots: [{ dayIdx: 0, timeId: "am" }] }),
+    ], { makeId: counter });
+    expect(res.scheduled.length).toBe(2);
+    expect(getAllConflicts(merge(s, res).appointments, SLOTS)).toEqual([]);
+  });
+});
