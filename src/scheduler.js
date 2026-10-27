@@ -78,6 +78,9 @@ export function candidateSlots(job, instructor, slots) {
   return out;
 }
 
+// A session of another section of the same course is meant to run alongside this one (the cohort is split), so it never blocks the student groups.
+const siblingSection = (job, a) => !job.custom && !!job.sectionId && !!job.courseId && a.courseId === job.courseId && !!a.sectionId && a.sectionId !== job.sectionId;
+
 function makeIndex(appointments) {
   const byDay = new Map(), byWeek = new Map();
   const norm = a => ({ ...a, groupIds: Array.isArray(a.groupIds) ? a.groupIds : [] });
@@ -134,7 +137,7 @@ function evaluate(ctx, week, dayIdx, timeId) {
 
   const wanted = (job.groupIds || []).filter(Boolean);
   if (wanted.length) {
-    const c = here.find(a => (a.groupIds || []).some(g => wanted.includes(g)));
+    const c = here.find(a => !siblingSection(job, a) && (a.groupIds || []).some(g => wanted.includes(g)));
     if (c) {
       const gid = (c.groupIds || []).find(g => wanted.includes(g));
       reasons.push({ code: "group-busy", detail: `${groups.find(g => g.id === gid)?.name || "A student group"} has ${c.courseCode || c.courseName || "a session"}` });
@@ -173,7 +176,8 @@ function softScore(ctx, week, dayIdx, timeId, anchor) {
   const day = index.day(week, dayIdx);
   if (job.instructorId) s -= 0.5 * day.filter(a => a.instructorId === job.instructorId).length; // spread the instructor's load
   const wanted = job.groupIds || [];
-  if (wanted.length) s -= 0.4 * day.filter(a => (a.groupIds || []).some(g => wanted.includes(g))).length; // lighter days for students
+  if (wanted.length) s -= 0.4 * day.filter(a => !siblingSection(job, a) && (a.groupIds || []).some(g => wanted.includes(g))).length; // lighter days for students
+  if (job.sectionId && day.some(a => siblingSection(job, a) && a.timeId === timeId)) s += 2.5; // run alongside the other sections
   if (anchor && anchor.dayIdx === dayIdx && anchor.timeId === timeId) s += 1.5;
   return s;
 }
