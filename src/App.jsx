@@ -365,12 +365,22 @@ function ApptChip({appt,courses,instructors,rooms,onClick,conflicts=[],selectabl
 // ═══════════════════════════════════════════════════════════════════
 //  COHORT TIMETABLE EXPORT
 // ═══════════════════════════════════════════════════════════════════
-function exportCohortHTML(state, groupId) {
-  const {appointments,courses,instructors,rooms,groups,week1Start,slots,settings}=state;
-  const group=groups.find(g=>g.id===groupId);
-  if(!group) return;
+// One or several groups: a timetable of every session that any of them attends, each session once.
+function cohortSelection(state, groupIds) {
+  const ids = (Array.isArray(groupIds) ? groupIds : [groupIds]).filter(Boolean);
+  const groups = ids.map(id => state.groups.find(g => g.id === id)).filter(Boolean);
+  const names = groups.map(g => g.name);
+  const label = names.length <= 3 ? names.join(", ") : `${names.slice(0, 3).join(", ")} and ${names.length - 3} more`;
+  const base = (names.length <= 2 ? names.join("+") : `${names.length}-groups`).replace(/\s+/g, "-");
+  const appts = Object.values(state.appointments).filter(a => (a.groupIds || []).some(g => ids.includes(g)));
+  return { groups, label, base, appts };
+}
 
-  const appts=Object.values(appointments).filter(a=>(a.groupIds||[]).includes(groupId));
+function exportCohortHTML(state, groupId) {
+  const {courses,instructors,rooms,week1Start,slots,settings}=state;
+  const sel=cohortSelection(state,groupId);
+  if(!sel.groups.length) return;
+  const {appts}=sel;
 
   // Build week→day→slot map
   const byWeek={};
@@ -439,7 +449,7 @@ function exportCohortHTML(state, groupId) {
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>${group.name} — Timetable — ${settings.semester}</title>
+<title>${sel.label} — Timetable — ${settings.semester}</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
   *{box-sizing:border-box;margin:0;padding:0;}
@@ -473,7 +483,7 @@ function exportCohortHTML(state, groupId) {
 </head>
 <body>
 <button class="print-btn" onclick="window.print()">Print / Save PDF</button>
-<h1>${group.name} — Timetable</h1>
+<h1>${sel.label} — Timetable</h1>
 <div class="subtitle">${settings.institution} &middot; ${settings.semester} &middot; ${appts.length} sessions scheduled</div>
 <table>${rows}</table>
 </body></html>`;
@@ -481,18 +491,17 @@ function exportCohortHTML(state, groupId) {
   const blob=new Blob([html],{type:"text/html"});
   const a=document.createElement("a");
   a.href=URL.createObjectURL(blob);
-  a.download=`${group.name.replace(/\s+/g,"-")}-timetable.html`;
+  a.download=`${sel.base}-timetable.html`;
   a.click();
   URL.revokeObjectURL(a.href);
 }
 
 function exportCohortCSV(state, groupId) {
-  const {appointments,courses,instructors,rooms,groups,slots}=state;
-  const group=groups.find(g=>g.id===groupId);
-  if(!group) return;
-  const appts=Object.values(appointments)
-    .filter(a=>(a.groupIds||[]).includes(groupId))
-    .sort((a,b)=>a.weekNum-b.weekNum||a.dayIdx-b.dayIdx);
+  const {instructors,rooms,groups,slots}=state;
+  const sel=cohortSelection(state,groupId);
+  if(!sel.groups.length) return;
+  const order=slots.map(x=>x.id);
+  const appts=[...sel.appts].sort((a,b)=>a.weekNum-b.weekNum||a.dayIdx-b.dayIdx||order.indexOf(a.timeId)-order.indexOf(b.timeId));
   const rows=[["Week","Day","Slot","Time","Course Code","Course Name","Instructor","Room","All Groups"]];
   appts.forEach(a=>{
     const instr=instructors.find(x=>x.id===a.instructorId)?.name||"";
@@ -507,7 +516,7 @@ function exportCohortCSV(state, groupId) {
   const blob=new Blob([csv],{type:"text/csv"});
   const a=document.createElement("a");
   a.href=URL.createObjectURL(blob);
-  a.download=`${group.name.replace(/\s+/g,"-")}-timetable.csv`;
+  a.download=`${sel.base}-timetable.csv`;
   a.click();
   URL.revokeObjectURL(a.href);
 }
@@ -524,7 +533,8 @@ function ExportDropdown({state,filterGroups=[]}) {
   },[]);
   const groups=state.groups;
   const targets=filterGroups.filter(id=>groups.some(g=>g.id===id));
-  const targetGroup=targets.length===1?targets[0]:null;
+  const targetGroup=targets.length?targets:null; // exported together as one timetable
+  const combined=targetGroup?cohortSelection(state,targetGroup):null;
 
   return (
     <div ref={ref} style={{position:"relative"}}>
@@ -544,13 +554,11 @@ function ExportDropdown({state,filterGroups=[]}) {
               Use the group filter to select a cohort first
             </div>
           )}
-          {targets.length>1&&targets.map(id=>(
-            <div key={id} style={{padding:"8px 14px",fontSize:13,borderBottom:"1px solid var(--border)",display:"flex",alignItems:"center",gap:8}}>
-              <span style={{flex:1,fontWeight:500}}>{groups.find(g=>g.id===id)?.name}</span>
-              <Btn variant="outline" size="xs" onClick={()=>{exportCohortHTML(state,id);setOpen(false);}}>HTML</Btn>
-              <Btn variant="outline" size="xs" onClick={()=>{exportCohortCSV(state,id);setOpen(false);}}>CSV</Btn>
+          {targetGroup&&targets.length>1&&(
+            <div style={{padding:"8px 14px",fontSize:12.5,color:"var(--muted)",borderBottom:"1px solid var(--border)"}}>
+              {targets.length} groups, {combined.appts.length} sessions, in one timetable. Each session appears once.
             </div>
-          ))}
+          )}
           {targetGroup&&(
             <>
               <div onClick={()=>{exportCohortHTML(state,targetGroup);setOpen(false);}}
@@ -560,7 +568,7 @@ function ExportDropdown({state,filterGroups=[]}) {
                 onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
                 <span style={{fontSize:14}}>🌐</span>
                 <div>
-                  <div style={{fontWeight:500}}>Export as HTML</div>
+                  <div style={{fontWeight:500}}>{targets.length>1?"All selected groups as HTML":"Export as HTML"}</div>
                   <div style={{fontSize:11.5,color:"var(--muted)"}}>Full printable timetable · open in browser</div>
                 </div>
               </div>
@@ -571,11 +579,23 @@ function ExportDropdown({state,filterGroups=[]}) {
                 onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
                 <span style={{fontSize:14}}>📊</span>
                 <div>
-                  <div style={{fontWeight:500}}>Export as CSV</div>
+                  <div style={{fontWeight:500}}>{targets.length>1?"All selected groups as CSV":"Export as CSV"}</div>
                   <div style={{fontSize:11.5,color:"var(--muted)"}}>All sessions · open in Excel or Sheets</div>
                 </div>
               </div>
             </>
+          )}
+          {targets.length>1&&(
+            <div style={{borderTop:"1px solid var(--border)"}}>
+              <div style={{padding:"8px 14px 4px",fontSize:11.5,color:"var(--muted)",fontWeight:600}}>Or one file per group</div>
+              {targets.map(id=>(
+                <div key={id} style={{padding:"4px 14px 6px",fontSize:13,display:"flex",alignItems:"center",gap:8}}>
+                  <span style={{flex:1,fontWeight:500}}>{groups.find(g=>g.id===id)?.name}</span>
+                  <Btn variant="outline" size="xs" onClick={()=>{exportCohortHTML(state,id);setOpen(false);}}>HTML</Btn>
+                  <Btn variant="outline" size="xs" onClick={()=>{exportCohortCSV(state,id);setOpen(false);}}>CSV</Btn>
+                </div>
+              ))}
+            </div>
           )}
           {/* Export all groups */}
           <div style={{borderTop:"1px solid var(--border)",padding:"6px 8px",display:"flex",flexWrap:"wrap",gap:4}}>
