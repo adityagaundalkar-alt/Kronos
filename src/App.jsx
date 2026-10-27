@@ -15,6 +15,7 @@ import { planRepeat } from "./repeat.js";
 import { suggestFixes } from "./fixes.js";
 import { askConfirm, ConfirmProvider } from "./ui/Confirm.jsx";
 import { buildGroupTree } from "./groups.js";
+import { sectionsOf, blankSection, sectionId } from "./sections.js";
 import { changesBetween, applyChanges, invert, MAX_HISTORY } from "./history.js";
 import GroupPicker from "./ui/GroupPicker.jsx";
 import SearchSelect from "./ui/SearchSelect.jsx";
@@ -67,6 +68,16 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
     }));
   },[form.courseId]);
 
+  const courseSecs=sectionsOf(courses.find(x=>x.id===form.courseId));
+  function pickSection(id) {
+    const c=courses.find(x=>x.id===form.courseId);
+    const sc=sectionsOf(c).find(x=>x.id===id);
+    setForm(f=>sc?{...f,sectionId:sc.id,section:sc.name,
+      instructorId:sc.instructorId||c.defaultInstructorId||"",
+      groupIds:sc.groupIds?.length?sc.groupIds:(c.defaultGroupIds||[]),
+      roomId:sc.roomId||f.roomId||""}:{...f,sectionId:"",section:""});
+  }
+
   // Optional custom start/end inside the slot (e.g. 10:00-11:30 in a 09:00-12:00 slot)
   const [useCustom,setUseCustom]=useState(()=>isEdit&&!!(appt.start&&appt.end));
   const slotObj=slots.find(s=>s.id===form.timeId);
@@ -95,7 +106,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
     if(blockingConflicts.length) return;
     const course=courses.find(x=>x.id===form.courseId);
     if(!timesCheck.ok) return;
-    const base={...effective,courseName:other?(form.courseName||"").trim():course?.name,courseCode:other?((form.courseCode||"").trim()||"EXTRA"):course?.code,section:form.section||""};
+    const base={...effective,courseName:other?(form.courseName||"").trim():course?.name,courseCode:other?((form.courseCode||"").trim()||"EXTRA"):course?.code,section:form.section||"",sectionId:form.sectionId||""};
     if(other) base.courseId="";
     // Remember which clashes were knowingly overridden, so they show as resolved (but still tracked) in Conflicts.
     const kept=[...new Set(conflicts.map(c=>c.type))].filter(t=>overrides[t]);
@@ -139,8 +150,8 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
         {/* Course */}
         <Field label="Course" required>
           <SearchSelect value={other?"__other":form.courseId} placeholder="— Select course —" options={[...courses.map(c=>({value:c.id,label:`[${c.code}] ${c.name}`})),{value:"__other",label:"Other event (extra class, workshop, exam…)"}]} onChange={v=>{
-            if(v==="__other"){setOther(true);setForm(f=>({...f,courseId:"",instructorId:"",groupIds:[]}));}
-            else{setOther(false);setForm(f=>{const n={...f,courseId:v,instructorId:"",groupIds:[]};delete n.courseName;delete n.courseCode;return n;});}
+            if(v==="__other"){setOther(true);setForm(f=>({...f,courseId:"",instructorId:"",groupIds:[],sectionId:"",section:""}));}
+            else{setOther(false);setForm(f=>{const n={...f,courseId:v,instructorId:"",groupIds:[],sectionId:"",section:""};delete n.courseName;delete n.courseCode;return n;});}
           }}/>
         </Field>
         {other&&(
@@ -230,10 +241,19 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
 
         {/* Section + Notes */}
         <div style={{display:"grid",gridTemplateColumns:"1fr 2fr",gap:8,marginBottom:12}}>
-          <Field label="Section" hint="e.g. A, B, 1, 2">
-            <input value={form.section||""} onChange={e=>setForm(f=>({...f,section:e.target.value}))}
-              placeholder="e.g. A"/>
-          </Field>
+          {courseSecs.length>0&&!other?(
+            <Field label="Section" hint="Fills instructor, groups and room">
+              <select value={form.sectionId||""} onChange={e=>pickSection(e.target.value)}>
+                <option value="">Whole course</option>
+                {courseSecs.map(sc=><option key={sc.id} value={sc.id}>{sc.name||"(unnamed)"}</option>)}
+              </select>
+            </Field>
+          ):(
+            <Field label="Section" hint="e.g. A, B, 1, 2">
+              <input value={form.section||""} onChange={e=>setForm(f=>({...f,section:e.target.value,sectionId:""}))}
+                placeholder="e.g. A"/>
+            </Field>
+          )}
           <Field label="Notes" hint="Optional session notes">
             <input value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))}
               placeholder="Any notes for this session..."/>
@@ -426,7 +446,7 @@ function exportCohortHTML(state, groupId) {
           const instr=instructors.find(x=>x.id===cell.instructorId);
           const room=rooms.find(x=>x.id===cell.roomId);
           return {pal,html:`
-          <div class="code" style="color:${pal.accent}">${esc(cell.courseCode)}</div>
+          <div class="code" style="color:${pal.accent}">${esc(cell.courseCode)}${cell.section?` §${esc(cell.section)}`:""}</div>
           ${customLabel(cell)?`<div class="meta">${esc(customLabel(cell))}</div>`:""}
           <div class="name">${esc(cell.courseName)}</div>
           ${instr?`<div class="meta">${esc(instr.name)}</div>`:""}
@@ -502,7 +522,7 @@ function exportCohortCSV(state, groupId) {
   if(!sel.groups.length) return;
   const order=slots.map(x=>x.id);
   const appts=[...sel.appts].sort((a,b)=>a.weekNum-b.weekNum||a.dayIdx-b.dayIdx||order.indexOf(a.timeId)-order.indexOf(b.timeId));
-  const rows=[["Week","Day","Slot","Time","Course Code","Course Name","Instructor","Room","All Groups"]];
+  const rows=[["Week","Day","Slot","Time","Course Code","Section","Course Name","Instructor","Room","All Groups"]];
   appts.forEach(a=>{
     const instr=instructors.find(x=>x.id===a.instructorId)?.name||"";
     const room=rooms.find(x=>x.id===a.roomId)?.name||"";
@@ -510,7 +530,7 @@ function exportCohortCSV(state, groupId) {
     const slotLabel=timeLabel(a,slots);
     rows.push([WEEKS.find(w=>w.n===a.weekNum)?.label||`W${a.weekNum}`,
       DAYS_FULL[a.dayIdx],a.timeId.toUpperCase(),slotLabel,
-      a.courseCode||"",a.courseName||"",instr,room,grps]);
+      a.courseCode||"",a.section||"",a.courseName||"",instr,room,grps]);
   });
   const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
   const blob=new Blob([csv],{type:"text/csv"});
@@ -928,7 +948,7 @@ function CSVImportModal({state,setState,toast,onClose}) {
   const [preview,setPreview]=useState(null); // {rows,headers,parsed}
   const [error,setError]=useState("");
   const [mapping,setMapping]=useState({
-    courseName:"",courseCode:"",instructor:"",group:"",category:"",credits:""  // group col accepts "CS-1A | CS-1B"
+    courseName:"",courseCode:"",instructor:"",group:"",section:"",category:"",credits:""  // group col accepts "CS-1A | CS-1B"
   });
   const [parseResult,setParseResult]=useState(null);
 
@@ -979,6 +999,7 @@ function CSVImportModal({state,setState,toast,onClose}) {
           courseCode: headers[detect(["code","course code","subject code"])]||headers[1]||"",
           instructor: headers[detect(["instructor","teacher","lecturer","staff"])]||"",
           group:      headers[detect(["group","cohort","class","student"])]||"",
+          section:    (headers.find(h=>/section/i.test(h)))||"",
           category:   headers[detect(["category","type","kind"])]||"",
           credits:    headers[detect(["credit","credits","units","hours"])]||"",
         };
@@ -1013,6 +1034,7 @@ function CSVImportModal({state,setState,toast,onClose}) {
       // Support multiple groups separated by pipe | or semicolon ;
       const groupRaw=get(row,mapping.group);
       const groupNames=groupRaw.split(/[|;]/).map(g=>g.trim()).filter(Boolean);
+      const sectionName=get(row,mapping.section).trim();
       const category=get(row,mapping.category).trim()||"Core";
       const credits=parseInt(get(row,mapping.credits))||3;
       if(!courseName) return;
@@ -1052,6 +1074,7 @@ function CSVImportModal({state,setState,toast,onClose}) {
           colorId:COLORS[colorIdx%COLORS.length],
           defaultInstructorId:instrId,
           defaultGroupIds:groupIds,
+          sections:[],
           category:CATEGORIES.includes(category)?category:"Core",
           credits,
         };
@@ -1065,6 +1088,15 @@ function CSVImportModal({state,setState,toast,onClose}) {
           if(!(course.defaultGroupIds||[]).includes(gid))
             course.defaultGroupIds=[...(course.defaultGroupIds||[]),gid];
         });
+      }
+      if(sectionName) {
+        const have=sectionsOf(course);
+        const ex=have.find(x=>x.name.toLowerCase()===sectionName.toLowerCase());
+        if(ex) { // fill gaps only
+          course.sections=have.map(x=>x===ex?{...x,instructorId:x.instructorId||instrId,groupIds:[...new Set([...(x.groupIds||[]),...groupIds])]}:x);
+        } else {
+          course.sections=[...have,{...blankSection(course.id,sectionName),instructorId:instrId,groupIds}];
+        }
       }
     });
 
@@ -1129,6 +1161,7 @@ Machine Learning,CS401,Prof. James Wright,Year 1 | Year 2,Elective,4`}
                 {[
                   ["courseName","Course Name *"],
                   ["courseCode","Course Code"],
+                  ["section","Section (optional)"],
                   ["instructor","Instructor"],
                   ["group","Student Groups (pipe-separated)"],
                   ["category","Category"],
@@ -1226,12 +1259,19 @@ function CoursesTab({state,setState,toast}) {
   const [showImport,setShowImport]=useState(false);
 
   const blank={id:"",name:"",code:"",colorId:"sky",defaultInstructorId:"",
-    defaultGroupIds:[],category:"Core",credits:3};
+    defaultGroupIds:[],sections:[],category:"Core",credits:3};
 
   function save(form) {
     const apptUpdates={};
+    const secs=sectionsOf(form);
     Object.entries(state.appointments).forEach(([k,a])=>{
-      if(a.courseId===form.id) apptUpdates[k]={...a,courseName:form.name,courseCode:form.code};
+      if(a.courseId!==form.id) return;
+      const u={...a,courseName:form.name,courseCode:form.code};
+      if(a.sectionId){ // follow renames; a removed section detaches its sessions
+        const sec=secs.find(x=>x.id===a.sectionId);
+        if(sec) u.section=sec.name; else { u.sectionId=""; u.section=""; }
+      }
+      apptUpdates[k]=u;
     });
     if(form.id) {
       setState(s=>({...s,
@@ -1298,7 +1338,7 @@ function CoursesTab({state,setState,toast}) {
       {editing&&(
         <div style={{flex:1,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch"}}>
           <CourseEditor form={editing} setForm={setEditing}
-            instructors={instructors} groups={groups}
+            instructors={instructors} groups={groups} rooms={state.rooms} appointments={state.appointments}
             onSave={save} onDelete={editing.id?()=>remove(editing.id):null}
             onClose={()=>setEditing(null)}/>
         </div>
@@ -1317,7 +1357,63 @@ function CoursesTab({state,setState,toast}) {
   );
 }
 
-function CourseEditor({form,setForm,instructors,groups,onSave,onDelete,onClose}) {
+function SectionsEditor({form,set,instructors,groups,rooms,appointments}) {
+  const secs=sectionsOf(form);
+  const nUsing=id=>Object.values(appointments||{}).filter(a=>a&&a.sectionId===id).length;
+  const upd=(id,patch)=>set("sections",secs.map(x=>x.id===id?{...x,...patch}:x));
+  const dup=name=>name.trim()&&secs.filter(x=>x.name.trim().toLowerCase()===name.trim().toLowerCase()).length>1;
+  async function drop(sc) {
+    const n=nUsing(sc.id);
+    if(n&&!await askConfirm({title:`Remove section ${sc.name||""}?`,message:`${n} scheduled session${n===1?"":"s"} use this section. They stay on the timetable without a section once you save the course.`,confirmLabel:"Remove section"})) return;
+    set("sections",secs.filter(x=>x.id!==sc.id));
+  }
+  return (
+    <Field label="Sections" hint="Optional. Use when this course runs in parts (Group A, Group B) with their own instructor, student groups and room. Each section is scheduled on its own.">
+      <div style={{display:"flex",flexDirection:"column",gap:10,marginTop:4}}>
+        {secs.length===0&&<div style={{fontSize:12.5,color:"var(--muted2)"}}>No sections. Sessions use the course defaults above.</div>}
+        {secs.map(sc=>(
+          <div key={sc.id} style={{border:"1px solid var(--border)",borderRadius:"var(--r)",padding:10,background:"var(--bg2)"}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:8,alignItems:"end"}}>
+              <Field label="Section name">
+                <input value={sc.name} onChange={e=>upd(sc.id,{name:e.target.value})} placeholder="e.g. A"/>
+              </Field>
+              <Field label="Instructor">
+                <SearchSelect value={sc.instructorId||""} onChange={v=>upd(sc.id,{instructorId:v})} noneLabel="Course default" options={instructors.map(i=>({value:i.id,label:i.name}))}/>
+              </Field>
+              <Btn variant="danger" onClick={()=>drop(sc)} title="Remove this section">Remove</Btn>
+            </div>
+            {dup(sc.name)&&<div style={{fontSize:11.5,color:"var(--red,#c0392b)",marginTop:4}}>Another section already uses this name.</div>}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:8}}>
+              <div style={{gridColumn:"1 / span 3"}}>
+                <Field label="Student groups">
+                  <GroupPicker groups={groups} value={sc.groupIds||[]} onChange={v=>upd(sc.id,{groupIds:v})} placeholder="Course default groups"/>
+                </Field>
+              </div>
+              <Field label="Room">
+                <SearchSelect value={sc.roomId||""} onChange={v=>upd(sc.id,{roomId:v})} noneLabel="Any" options={(rooms||[]).map(r=>({value:r.id,label:r.name,hint:`${r.capacity} seats`}))}/>
+              </Field>
+              <Field label="Room type">
+                <select value={sc.roomType||""} onChange={e=>upd(sc.id,{roomType:e.target.value})}>
+                  <option value="">Any</option>
+                  {ROOM_TYPES.map(t=><option key={t} value={t}>{t}</option>)}
+                </select>
+              </Field>
+            </div>
+            <div style={{fontSize:11.5,color:"var(--muted2)",marginTop:6}}>{nUsing(sc.id)} scheduled session{nUsing(sc.id)===1?"":"s"}</div>
+          </div>
+        ))}
+        <div><Btn variant="outline" onClick={()=>{
+          const base=String.fromCharCode(65+secs.length);
+          let name=base,i=secs.length;
+          while(secs.some(x=>x.name.toLowerCase()===name.toLowerCase())) name=String.fromCharCode(65+(++i));
+          set("sections",[...secs,blankSection("",name)]);
+        }}>+ Add section</Btn></div>
+      </div>
+    </Field>
+  );
+}
+
+function CourseEditor({form,setForm,instructors,groups,rooms,appointments,onSave,onDelete,onClose}) {
   const set=(k,v)=>setForm(f=>({...f,[k]:v}));
   const pal=paletteById(form.colorId);
   return (
@@ -1357,6 +1453,7 @@ function CourseEditor({form,setForm,instructors,groups,onSave,onDelete,onClose})
       <Field label="Default Student Groups" hint="Pre-selected when scheduling this course">
         <GroupPicker groups={groups} value={form.defaultGroupIds} onChange={v=>set("defaultGroupIds",v)} placeholder="Select default groups..."/>
       </Field>
+      <SectionsEditor form={form} set={set} instructors={instructors} groups={groups} rooms={rooms} appointments={appointments}/>
       <Field label="Color">
         <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:4}}>
           {PALETTE.map(p=>(
@@ -1728,12 +1825,12 @@ function InstructorTab({state,onApptClick}) {
 
   function downloadCSV() {
     const all=Object.values(appointments).filter(a=>a.instructorId===selInstructor);
-    const rows=[["Week","Day","Slot","Course","Code","Room","Groups"]];
+    const rows=[["Week","Day","Slot","Course","Code","Section","Room","Groups"]];
     all.sort((a,b)=>a.weekNum-b.weekNum||a.dayIdx-b.dayIdx).forEach(a=>{
       const room=rooms.find(r=>r.id===a.roomId)?.name||"TBD";
       const grps=a.groupIds?.map(g=>groups.find(x=>x.id===g)?.name).filter(Boolean).join(", ")||"";
       rows.push([WEEKS.find(w=>w.n===a.weekNum)?.label||a.weekNum,DAYS_FULL[a.dayIdx],
-        timeLabel(a,slots),a.courseName,a.courseCode,room,grps]);
+        timeLabel(a,slots),a.courseName,a.courseCode,a.section||"",room,grps]);
     });
     const csv=rows.map(r=>r.map(c=>`"${c}"`).join(",")).join("\n");
     const a=document.createElement("a");
@@ -1870,7 +1967,7 @@ function ConflictsTab({conflicts,state,onApptClick,onFix}) {
                         style={{flex:1,minWidth:140,background:pal.bg,border:`1px solid ${pal.border}`,
                           borderRadius:"var(--r)",padding:"7px 10px",cursor:"pointer"}}>
                         <div style={{fontSize:11,fontFamily:"var(--mono)",color:pal.accent,fontWeight:600,marginBottom:2}}>
-                          {appt.courseCode}
+                          {appt.courseCode}{appt.section?` §${appt.section}`:""}
                         </div>
                         <div style={{fontSize:12.5,color:pal.accent}}>{appt.courseName}</div>
                         <div style={{fontSize:11,color:"var(--muted)",fontFamily:"var(--mono)",marginTop:2}}>{timeLabel(appt,slots)}</div>
