@@ -141,6 +141,46 @@ export const listMyTerms = async (uid) => {
   return v ? Object.values(v).filter((t) => t && t.code) : [];
 };
 export const saveMyTerm = (uid, term) => set(ref(db, `users/${uid}/terms/${term.code}`), term);
+// --- Who uses the app: logins/<uid> = { name, email, provider, first, last, terms: { rid: { role, name, last } } } ---
+/** Note this identity (and, inside a term, the term). Best effort: never blocks or fails the caller. */
+export const recordLogin = async (name, term) => {
+  const u = auth.currentUser;
+  if (!u) return;
+  const path = `logins/${u.uid}`, now = Date.now();
+  const upd = { provider: u.isAnonymous ? "code" : "google", last: now };
+  const nm = String(name || u.displayName || "").slice(0, 100);
+  if (nm) upd.name = nm;
+  if (!u.isAnonymous && u.email) upd.email = u.email;
+  try { if (!(await get(ref(db, `${path}/first`))).exists()) upd.first = now; } catch { /* rules not published yet */ }
+  if (term?.rid) upd[`terms/${term.rid}`] = { role: term.role || "", name: String(term.name || "").slice(0, 120), last: now };
+  try { await update(ref(db, path), upd); } catch { /* ignore */ }
+};
+
+// --- Super admin (every read below is allowed by the rules only for the super admin account) ---
+export const superApi = {
+  allCodes: () => store.get("codes"),
+  logins: () => store.get("logins"),
+  meta: (rid) => store.get(`rooms/${rid}/meta`),
+  access: (rid) => store.get(`rooms/${rid}/access`),
+  ops: async (rid, n = 500) => {
+    const s = await get(query(roomRef(rid, "ops"), limitToLast(n)));
+    return s.exists() ? s.val() : {};
+  },
+  room: (rid) => loadRoom(rid),
+  watchPresence: (rid, cb) => onValue(roomRef(rid, "presence"), (snap) => cb(snap.val() || {}), () => cb({})),
+  /** Take one person out of a term: every code they joined with stops working for them. */
+  async removeMember(rid, uid, codes) {
+    for (const code of Object.values(codes || {})) await store.remove(`rooms/${rid}/access/${code}/${uid}`);
+    try { await store.remove(`logins/${uid}/terms/${rid}`); } catch { /* ignore */ }
+  },
+  /** Delete a term for everyone: its codes first (so nobody can rejoin), then the term itself. */
+  async deleteTerm(rid, codes, uids = []) {
+    for (const code of Object.values(codes || {})) await store.remove(`codes/${code}`);
+    await store.remove(`rooms/${rid}`);
+    for (const uid of uids) { try { await store.remove(`logins/${uid}/terms/${rid}`); } catch { /* ignore */ } }
+  },
+};
+
 export const removeMyTerm = (uid, code) => remove(ref(db, `users/${uid}/terms/${code}`));
 
 /** Returns { tree } (v2 data), { legacy } (old whole-state blob) or null. */
@@ -216,6 +256,8 @@ export const subscribePresence = (code, cb) =>
  * removes our node when the connection drops. Returns { update(fields), leave() }.
  */
 export const joinPresence = (code, userId, initial) => {
+  // Who this tab belongs to, so several tabs or browsers of one person show as one.
+  initial = { uid: auth.currentUser?.uid || null, acct: !!auth.currentUser && !auth.currentUser.isAnonymous, ...initial };
   const me = roomRef(code, `presence/${userId}`);
   let data = { ...initial, at: Date.now() };
   const announce = () => {

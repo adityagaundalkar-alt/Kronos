@@ -11,8 +11,9 @@ export const useConfirm = () => useContext(ConfirmCtx);
 
 export function ConfirmProvider({ children }) {
   const [req, setReq] = useState(null);
+  const [typed, setTyped] = useState("");
   const resolver = useRef(null);
-  const confirm = useCallback(opts => new Promise(res => { resolver.current?.(false); resolver.current = res; setReq(opts); }), []);
+  const confirm = useCallback(opts => new Promise(res => { resolver.current?.(false); resolver.current = res; setTyped(""); setReq(opts); }), []);
   ask = confirm;
   const done = ok => { const r = resolver.current; resolver.current = null; setReq(null); r?.(ok); };
   return (
@@ -22,9 +23,15 @@ export function ConfirmProvider({ children }) {
         <Modal title={req.title || "Are you sure?"} onClose={() => done(false)} width={440}>
           <div style={{ fontSize: 14.5, lineHeight: 1.5, marginBottom: 18 }}>{req.message}</div>
           {req.detail && <div className="callout warn" style={{ marginBottom: 18 }}>{req.detail}</div>}
+          {req.typeToConfirm && (
+            <label style={{ display: "block", fontSize: 14, marginBottom: 18 }}>
+              Type <b>{req.typeToConfirm}</b> to confirm
+              <input autoFocus value={typed} onChange={e => setTyped(e.target.value)} style={{ marginTop: 6, width: "100%" }} aria-label={`Type ${req.typeToConfirm} to confirm`} />
+            </label>
+          )}
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
             <Btn variant="outline" onClick={() => done(false)}>Cancel</Btn>
-            <Btn variant={req.danger === false ? "primary" : "danger"} onClick={() => done(true)}>{req.confirmLabel || "Delete"}</Btn>
+            <Btn variant={req.danger === false ? "primary" : "danger"} disabled={!!req.typeToConfirm && typed.trim() !== req.typeToConfirm} onClick={() => done(true)}>{req.confirmLabel || "Delete"}</Btn>
           </div>
         </Modal>
       )}

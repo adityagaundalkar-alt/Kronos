@@ -128,8 +128,8 @@ export function createRulesDb(rulesJson, initial = {}) {
     return newTree;
   }
 
-  db.as = (uid, provider = "anonymous") => {
-    const auth = uid ? { uid, token: { firebase: { sign_in_provider: provider } } } : null;
+  db.as = (uid, provider = "anonymous", token = {}) => {
+    const auth = uid ? { uid, token: { ...token, firebase: { sign_in_provider: provider } } } : null;
     return {
       uid,
       async get(path) { if (!canRead(path, auth)) throw denied(path); const v = getAt(db.tree, path); return v === undefined ? null : clone(v); },

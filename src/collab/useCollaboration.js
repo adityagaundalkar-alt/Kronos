@@ -2,13 +2,14 @@
 // comments, and recovering when someone's access changes. The data syncing itself lives in
 // roomClient.js; roles and codes live in access.js and the database rules.
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
-import { auth, ensureAuth, loadRoom, writeRoomTree, updateRoom, subscribeRoom, pushOp, subscribePresence, joinPresence,
+import { auth, ensureAuth, loadRoom, writeRoomTree, updateRoom, subscribeRoom, pushOp, subscribePresence, joinPresence, recordLogin,
   access, getRoomMeta, subscribeMeta, subscribeComments, newCommentId, saveComment, patchComment, deleteComment } from "../firebase.js";
 import { createRoomClient } from "../roomClient.js";
 import { uid, USER_COLORS, userColor } from "../constants.js";
 import { rememberRoom } from "../state.js";
 import { applyCommentEvent, groupByAppt, openCounts, makeComment } from "../comments.js";
 import { can } from "../access.js";
+import { dedupePresence, fresh } from "../superAdmin.js";
 
 const PRESENCE_STALE_MS = 60000;
 
@@ -64,7 +65,7 @@ export function useCollaboration({ getState, applyRemote, toast, sanitize, backu
       userId: uid(), uid: auth.currentUser?.uid || null, userName,
       userColor: existingColor || userColor(Math.floor(Math.random() * USER_COLORS.length)),
     };
-    await client.join(rid, { userId: sess.userId, userName }, !!create, { readOnly: role === "viewer" });
+    await client.join(rid, { userId: sess.userId, userName, uid: sess.uid }, !!create, { readOnly: role === "viewer" });
     sessionRef.current = sess; setSession(sess); setAccessLost(null);
     cleanupRef.current.push(subscribePresence(rid, setRawPresence));
     cleanupRef.current.push(subscribeMeta(rid, m => {            // the term's name, and whether an admin has archived it
@@ -80,6 +81,7 @@ export function useCollaboration({ getState, applyRemote, toast, sanitize, backu
     }, () => {}));
     cleanupRef.current.push(subscribeComments(rid, (id, v) => setCommentMap(m => applyCommentEvent(m, id, v)), () => {}));
     presenceCtl.current = joinPresence(rid, sess.userId, { name: userName, color: sess.userColor, role, tab: "schedule", editing: null });
+    recordLogin(userName, { rid, role, name: roomName });
     const t = setInterval(() => setTick(x => x + 1), 15000); // re-evaluate who is stale
     cleanupRef.current.push(() => clearInterval(t));
     return sess;
@@ -170,10 +172,10 @@ export function useCollaboration({ getState, applyRemote, toast, sanitize, backu
   const setPresenceFields = fields => presenceCtl.current?.update(fields);
 
   const presence = useMemo(() => {
-    const now = Date.now(), out = {};
-    Object.entries(rawPresence || {}).forEach(([id, p]) => { if (p && now - (p.at || 0) < PRESENCE_STALE_MS) out[id] = p; });
-    return out;
-  }, [rawPresence, tick]);
+    const s = session, u = auth.currentUser;
+    const self = s ? { userId: s.userId, uid: s.uid, acct: !!u && !u.isAnonymous, name: s.userName } : null;
+    return dedupePresence(fresh(rawPresence, Date.now(), PRESENCE_STALE_MS), self); // one entry per person, however many tabs
+  }, [rawPresence, tick, session]);
 
   // ── Comments ──
   const commentMapRef = useRef({});

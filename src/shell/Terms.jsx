@@ -22,7 +22,7 @@ function TermRow({ term, opening, onOpen, onForget }) {
  * Where people land: pick a term to work in, start a new one, or join with a code.
  *   terms        [{ code, name, role, archived }]
  */
-export default function TermsScreen({ terms, openingCode, error, user, onOpen, onForget, onNew, onJoin, onSignIn, onSignOut, onLocal }) {
+export default function TermsScreen({ terms, openingCode, error, user, onOpen, onForget, onNew, onJoin, onSignIn, onSignOut, onLocal, onSuper }) {
   const current = terms.filter(t => !t.archived), older = terms.filter(t => t.archived);
   const list = (items) => <ul style={{ listStyle: "none", display: "flex", flexDirection: "column", gap: 8, padding: 0, margin: 0 }}>{items.map(t => <TermRow key={t.code} term={t} opening={openingCode === t.code} onOpen={onOpen} onForget={onForget} />)}</ul>;
   return (
@@ -38,6 +38,7 @@ export default function TermsScreen({ terms, openingCode, error, user, onOpen, o
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 24 }}>
           <Btn variant="primary" size="md" onClick={onNew}><Icon name="plus" size={16} /> New term</Btn>
           <Btn variant="outline" size="md" onClick={onJoin}><Icon name="people" size={16} /> Join with a code</Btn>
+          {onSuper && <Btn variant="outline" size="md" onClick={onSuper} style={{ marginLeft: "auto" }}>Super admin</Btn>}
         </div>
         {error && <div className="callout bad" role="alert" style={{ marginBottom: 16 }}>{error}</div>}
 

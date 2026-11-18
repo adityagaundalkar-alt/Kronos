@@ -387,3 +387,47 @@ describe("saved versions", () => {
     expect(await cara.store.get(`rooms/${room.rid}/versions`)).toBeNull();
   });
 });
+
+describe("super admin", () => {
+  const SUPER = { email: "aditya.gaundalkar@gmail.com", email_verified: true };
+  const boss = () => db.as("boss", "google.com", SUPER);
+  it("lists every code, login and member, and reads any term", async () => {
+    await bob.store.set("logins/bob", { name: "Bob", provider: "code", last: 1 });
+    const s = boss();
+    expect(Object.keys(await s.get("codes"))).toHaveLength(3);
+    expect(await s.get("logins")).toMatchObject({ bob: { name: "Bob" } });
+    expect(Object.keys(await s.get(`rooms/${room.rid}/access`))).toHaveLength(3);
+    expect(await s.get(`rooms/${room.rid}/v2/courses/c1`)).toMatchObject({ name: "Intro" });
+    expect(await s.get(`rooms/${room.rid}/secrets/admin`)).toBe(room.codes.admin);
+  });
+  it("needs the verified account: other or unverified emails get nothing", async () => {
+    for (const s of [db.as("x", "google.com", { email: "someone@gmail.com", email_verified: true }), db.as("y", "google.com", { email: SUPER.email, email_verified: false })]) {
+      await expect(s.get("codes")).rejects.toMatchObject(denied);
+      await expect(s.get("logins")).rejects.toMatchObject(denied);
+      await expect(s.get(`rooms/${room.rid}/v2`)).rejects.toMatchObject(denied);
+    }
+  });
+  it("people can record only their own login, and cannot list others", async () => {
+    await bob.store.set("logins/bob", { name: "Bob", last: 1 });
+    await expect(cara.store.set("logins/bob", { name: "Cara" })).rejects.toMatchObject(denied);
+    await expect(bob.store.get("logins")).rejects.toMatchObject(denied);
+    expect(await bob.store.get("logins/bob")).toMatchObject({ name: "Bob" });
+  });
+  it("manages terms: archive, reset codes, remove a member, delete", async () => {
+    const s = boss();
+    const sa = createAccess(s, () => "boss");
+    await sa.setArchived(room.rid, true);
+    const fresh = await sa.rotate(room.rid, "editor", { makeCode: () => "NEWEDIT1" });
+    expect(fresh).toBe("NEWEDIT1");
+    await expect(bob.store.get(`rooms/${room.rid}/v2`)).rejects.toMatchObject(denied); // old editor code is gone
+    await s.remove(`rooms/${room.rid}/access/${room.codes.viewer}/cara`);
+    await expect(cara.store.get(`rooms/${room.rid}/v2`)).rejects.toMatchObject(denied);
+    for (const c of [room.codes.admin, "NEWEDIT1", room.codes.viewer]) await s.remove(`codes/${c}`);
+    await s.remove(`rooms/${room.rid}`);
+    expect(db.tree.rooms?.[room.rid]).toBeUndefined();
+  });
+  it("nobody else can delete a whole term, not even its admin", async () => {
+    await expect(alice.store.remove(`rooms/${room.rid}`)).rejects.toMatchObject(denied);
+    await expect(boss().set(`rooms/${room.rid}`, { meta: { name: "x" } })).rejects.toMatchObject(denied);
+  });
+});

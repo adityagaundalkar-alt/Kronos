@@ -16,7 +16,7 @@ import { stateToFlat, diffFlat, flatToTree, treeToState, applyRemoteChange } fro
 export function createRoomClient({ api, getState, applyRemote, sanitize, callbacks = {}, flushMs = 30, quietMs = 2000, now = Date.now }) {
   const cb = { onRemoteChange() {}, onSyncing() {}, onSynced() {}, onError() {}, onAccessLost() {}, backup() {}, ...callbacks };
   let code = null, unsubscribe = null, queue = [], timer = null, quietUntil = 0, pending = 0;
-  let userId = null, userName = "", readOnly = false;
+  let userId = null, userName = "", userUid = null, readOnly = false;
 
   function enqueue(col, id, value) {
     queue.push([col, id, value]);
@@ -51,7 +51,7 @@ export function createRoomClient({ api, getState, applyRemote, sanitize, callbac
         applyRemote(() => sanitize(remote));
       }
     } finally { cb.onSyncing(false); }
-    code = roomCode; userId = who.userId; userName = who.userName;
+    code = roomCode; userId = who.userId; userName = who.userName; userUid = who.uid || null;
     quietUntil = now() + quietMs; // the initial replay of existing items is not news
     unsubscribe = api.subscribeRoom(roomCode, enqueue, err => {
       if (!code) return; // already left
@@ -81,7 +81,7 @@ export function createRoomClient({ api, getState, applyRemote, sanitize, callbac
       })
       .finally(() => { if (--pending <= 0) { pending = 0; cb.onSyncing(false); } });
     if (opType) {
-      Promise.resolve(api.pushOp(room, { id: Math.random().toString(36).slice(2, 9), userId, userName, at: now(), type: opType, detail: opDetail || "" })).catch(() => {});
+      Promise.resolve(api.pushOp(room, { id: Math.random().toString(36).slice(2, 9), userId, userName, ...(userUid ? { uid: userUid } : {}), at: now(), type: opType, detail: opDetail || "" })).catch(() => {});
     }
   }
 
