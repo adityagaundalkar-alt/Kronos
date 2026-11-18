@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo, useContext } from "react";
-import { signInWithGoogle, linkWithGoogle, currentUser, explainAuthError, signOutUser, ensureAuth, onAuthChange, access, loadRoom, listMyTerms, saveMyTerm, removeMyTerm } from "./firebase.js";
+import { isSuperUser } from "./superAdmin.js";
+import SuperAdmin from "./features/SuperAdmin.jsx";
+import { recordLogin, signInWithGoogle, linkWithGoogle, currentUser, explainAuthError, signOutUser, ensureAuth, onAuthChange, access, loadRoom, listMyTerms, saveMyTerm, removeMyTerm } from "./firebase.js";
 import { iso, parseISO, addDays, fmt, fmtLong, getWeekStart, slotDate } from "./dates.js";
 import { treeToState } from "./sync.js";
 import { checkConflicts, getAllConflicts } from "./conflicts.js";
@@ -2235,6 +2237,9 @@ function Builder() {
   const [termsError, setTermsError] = useState("");
   const [showShare, setShowShare] = useState(false);
   const [showMore, setShowMore] = useState(false);
+  const [showSuper, setShowSuper] = useState(false);
+  const isSuper = isSuperUser(user);
+  useEffect(() => { if (user?.uid) recordLogin(user.displayName || ""); }, [user?.uid]);
   const [userName, setUserName] = useState(readName);
   const stateRef = useRef(state);          // always the latest state, readable outside render
   const toast = useToasts();
@@ -2502,6 +2507,15 @@ function Builder() {
   );
   if (!user && !skipAuth) return <LoginScreen onSkip={() => setSkipAuth(true)} />;
 
+  const superPage = showSuper && isSuper && (
+    <>
+      <SuperAdmin onBack={() => setShowSuper(false)} toast={toast.push}
+        onOpenTerm={async term => { setShowSuper(false); await handleOpenTerm(term); }} />
+      <Toasts list={toast.list} dismiss={toast.dismiss} />
+    </>
+  );
+  if (superPage) return superPage;
+
   const collabModal = showCollab && (
     <CollabModal onCreate={handleCreateRoom} onJoin={handleJoinRoom} onClose={() => { setShowCollab(null); setPendingCode(""); }} defaultName={userName}
       initialCode={pendingCode || joinLinkCode} initialMode={showCollab} terms={termList} />
@@ -2510,7 +2524,7 @@ function Builder() {
     <>
       <TermsScreen terms={termList} openingCode={openingCode} error={termsError} user={user}
         onOpen={handleOpenTerm} onForget={handleForgetTerm} onNew={() => setShowCollab("create")} onJoin={() => setShowCollab("join")}
-        onSignIn={handleSignIn} onSignOut={handleSignOut} onLocal={() => setLocalMode(true)} />
+        onSignIn={handleSignIn} onSignOut={handleSignOut} onLocal={() => setLocalMode(true)} onSuper={isSuper ? () => setShowSuper(true) : null} />
       {collabModal}
       <Toasts list={toast.list} dismiss={toast.dismiss} />
     </>
@@ -2548,6 +2562,7 @@ function Builder() {
                   <Btn variant="outline" size="md" onClick={() => stepHistory("redo")} disabled={!canRedo} title={canRedo ? `Redo ${redoStack.current[redoStack.current.length - 1].label} (Ctrl+Shift+Z)` : "Nothing to redo"} label="Redo"><Icon name="redo" size={16} /></Btn>
                 </div>
               )}
+              {isSuper && <Btn variant="outline" size="md" onClick={() => setShowSuper(true)} title="Every term and everyone who uses Kronos"><Icon name="lock" size={16} /> <span className="hide-sm">Super admin</span></Btn>}
               {!session && <Btn variant="outline" size="md" onClick={() => setLocalMode(false)}><Icon name="people" size={16} /> <span className="hide-sm">Open a term</span></Btn>}
               {canEdit && <Btn variant="primary" size="md" onClick={() => setModal({ weekNum: 1, dayIdx: 0, timeId: state.slots[0]?.id })}><Icon name="plus" size={16} /> Schedule</Btn>}
             </div>

@@ -6,9 +6,13 @@ import { fileURLToPath } from "node:url";
 const S = k => `root.child('rooms/'+$rid+'/secrets/${k}')`;
 const has = k => `${S(k)}.exists() && root.child('rooms/'+$rid+'/access/'+${S(k)}.val()+'/'+auth.uid).exists()`;
 
+// The super admin (see src/superAdmin.js): a verified Google account that may read and manage every term.
+const SUPER_EMAILS = ["aditya.gaundalkar@gmail.com"];
+const isSuper = `(auth != null && auth.token.email_verified === true && (${SUPER_EMAILS.map(e => `auth.token.email === '${e}'`).join(" || ")}))`;
+
 const validRid = `$rid.matches(/^[A-Za-z0-9]{6,24}$/)`;
 const legacyOpen = `!root.child('rooms/'+$rid+'/secrets').exists()`;   // old rooms: no roles, everyone with the code edits
-const isAdmin = `(${has("admin")})`;
+const isAdmin = `(${isSuper} || ${has("admin")})`;
 const isEditor = `(${has("editor")})`;
 const isViewer = `(${has("viewer")})`;
 const canEdit = `(${legacyOpen} || ${isAdmin} || ${isEditor})`;
@@ -32,18 +36,30 @@ export function buildRules() {
         },
       },
 
+      // Who has used the app: one record per identity, written by that person; only the super admin can list them.
+      logins: {
+        ".read": isSuper,
+        $uid: {
+          ".read": "auth != null && auth.uid === $uid",
+          ".write": `auth != null && (auth.uid === $uid || ${isSuper})`,
+          ".validate": "!newData.exists() || !newData.child('name').exists() || (newData.child('name').isString() && newData.child('name').val().length <= 100)",
+        },
+      },
+
       // code -> room lookup. Anyone signed in can look up a code they were given (there is no way to list codes);
       // only that room's admin can create or remove them.
       codes: {
+        ".read": isSuper,
         $code: {
           ".read": "auth != null && $code.matches(/^[A-Z0-9]{6,12}$/)",
-          ".write": `auth != null && $code.matches(/^[A-Z0-9]{6,12}$/) && ((!data.exists() && newData.child('rid').isString() && (${adminOfRid("newData.child('rid').val()")})) || (data.exists() && (${adminOfRid("data.child('rid').val()")})))`,
+          ".write": `auth != null && $code.matches(/^[A-Z0-9]{6,12}$/) && ((!data.exists() && newData.child('rid').isString() && (${adminOfRid("newData.child('rid').val()")})) || (data.exists() && (${adminOfRid("data.child('rid').val()")})) || ${isSuper})`,
           ".validate": "newData.hasChildren(['rid','role']) && newData.child('rid').isString() && (newData.child('role').val() === 'admin' || newData.child('role').val() === 'editor' || newData.child('role').val() === 'viewer')",
         },
       },
 
       rooms: {
         $rid: {
+          ".write": `${authed} && ${isSuper} && !newData.exists()`, // deleting a whole term
           // Room details and timetable data.
           meta: {
             ".read": read(isMember),
@@ -95,6 +111,7 @@ export function buildRules() {
 
           // "This person joined with this code". People may only add themselves, and only with a real code.
           access: {
+            ".read": read(isSuper),
             $code: {
               ".write": read(isAdmin),
               $uid: {

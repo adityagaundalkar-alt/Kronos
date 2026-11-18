@@ -108,13 +108,13 @@ export function createAccess(store, getUid) {
   }
 
   /** Replace a role's code. Everyone who joined with the old code loses access immediately. */
-  async function rotate(rid, role, { makeCode = genCode } = {}) {
+  async function rotate(rid, role, { makeCode = genCode, keepMe = true } = {}) {
     const me = uid();
     const old = await store.get(`rooms/${rid}/secrets/${role}`);
     const fresh = makeCode();
     await store.set(`codes/${fresh}`, { rid, role });
     await store.set(`rooms/${rid}/secrets/${role}`, fresh);
-    if (role === "admin") await store.set(`rooms/${rid}/access/${fresh}/${me}`, true); // keep the person rotating it as admin
+    if (role === "admin" && keepMe) await store.set(`rooms/${rid}/access/${fresh}/${me}`, true); // keep the person rotating it as admin
     if (old) {
       await store.remove(`rooms/${rid}/access/${old}`);
       await store.remove(`codes/${old}`);
