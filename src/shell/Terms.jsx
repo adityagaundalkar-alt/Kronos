@@ -31,7 +31,7 @@ export default function TermsScreen({ terms, openingCode, error, user, onOpen, o
         <div className="brand" style={{ padding: 0, color: "var(--text)", marginBottom: 28 }}>
           <span className="brand-mark" aria-hidden="true">K</span><span className="brand-name">Kronos<small>2.0</small></span>
         </div>
-        <h1 style={{ font: "400 clamp(30px, 6vw, 42px)/1.05 var(--serif)", marginBottom: 6 }}>Your terms</h1>
+        <h1 style={{ font: "600 clamp(30px, 6vw, 42px)/1.05 var(--serif)", marginBottom: 6 }}>Your terms</h1>
         <p style={{ color: "var(--muted)", marginBottom: 20, lineHeight: 1.5 }}>
           Each term has its own timetable that everyone on the team works in together. Older terms stay saved so you can look back at them.
         </p>

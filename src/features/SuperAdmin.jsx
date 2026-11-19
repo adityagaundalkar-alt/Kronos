@@ -90,7 +90,7 @@ export default function SuperAdmin({ onBack, onOpenTerm, toast }) {
           <span style={{ flex: 1 }} />
           <Btn variant="outline" onClick={reload} disabled={loading}>{loading ? "Loading…" : "Reload"}</Btn>
         </div>
-        <h1 style={{ font: "400 clamp(28px, 5vw, 40px)/1.05 var(--serif)", marginBottom: 6 }}>Super admin</h1>
+        <h1 style={{ font: "600 clamp(28px, 5vw, 40px)/1.05 var(--serif)", marginBottom: 6 }}>Super admin</h1>
         <p style={{ ...muted, fontSize: 14.5, marginBottom: 18, lineHeight: 1.5 }}>
           Every term and everyone who has used Kronos. Only your account can see this page.
         </p>

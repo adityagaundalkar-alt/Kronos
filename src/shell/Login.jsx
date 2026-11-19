@@ -17,7 +17,7 @@ export default function LoginScreen({ onSkip }) {
         <section style={{ background: "var(--ink)", color: "var(--ink-strong)", padding: "clamp(28px, 6vw, 64px)", display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 32 }}>
           <div className="brand" style={{ padding: 0 }}><span className="brand-mark" aria-hidden="true">K</span><span className="brand-name">Kronos<small>2.0</small></span></div>
           <div>
-            <h1 style={{ font: "400 clamp(40px, 6vw, 68px)/1.02 var(--serif)", letterSpacing: "-.01em", maxWidth: "12ch" }}>Every class in its place.</h1>
+            <h1 style={{ font: "600 clamp(40px, 6vw, 68px)/1.02 var(--serif)", letterSpacing: "-.01em", maxWidth: "12ch" }}>Every class in its place.</h1>
             <p style={{ color: "var(--ink-text)", fontSize: 17, lineHeight: 1.5, maxWidth: "38ch", marginTop: 16 }}>
               Build each term's timetable with your team, catch clashes before students do, and share a read-only view with instructors.
             </p>
@@ -30,7 +30,7 @@ export default function LoginScreen({ onSkip }) {
           </div>
         </section>
         <section style={{ padding: "clamp(24px, 5vw, 56px)", display: "flex", flexDirection: "column", justifyContent: "center", maxWidth: 520 }}>
-          <h2 style={{ font: "400 32px/1.1 var(--serif)", marginBottom: 8 }}>Welcome</h2>
+          <h2 style={{ font: "600 32px/1.1 var(--serif)", marginBottom: 8 }}>Welcome</h2>
           <p style={{ color: "var(--muted)", marginBottom: 22, lineHeight: 1.5 }}>Sign in to see your terms on any device. You can also start without an account.</p>
           <Btn variant="outline" size="md" onClick={handleGoogle} disabled={loading} style={{ width: "100%", minHeight: 46, marginBottom: 10 }}>
             <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
