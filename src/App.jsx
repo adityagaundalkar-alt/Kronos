@@ -388,7 +388,7 @@ function ApptChip({appt,courses,instructors,rooms,onClick,conflicts=[],selectabl
       draggable={draggable||undefined} onDragStart={draggable?e=>onDragStart?.(e,appt):undefined} onDragEnd={draggable?onDragEnd:undefined}
       title={editors.length?`Being edited by ${editors.map(e=>e.name).join(", ")}`:undefined}
       style={{background:pal.bg,borderColor:editors.length?editors[0].color:pal.border,borderLeftColor:pal.accent,color:pal.accent,
-        boxShadow:selected?"0 0 0 2px var(--accent)":editors.length?`0 0 0 1px ${editors[0].color}`:undefined,cursor:draggable?"grab":undefined,outline:selected?"2px solid var(--accent)":undefined,outlineOffset:selected?1:undefined}}>
+        boxShadow:selected?"0 0 0 3px var(--signal)":editors.length?`0 0 0 1px ${editors[0].color}`:undefined,cursor:draggable?"grab":undefined,outline:selected?"1px solid var(--on-signal, #2e2100)":undefined,outlineOffset:selected?0:undefined}}>
       {selectable&&<span aria-hidden="true" style={{position:"absolute",top:3,right:4,width:16,height:16,borderRadius:4,border:"1.5px solid "+(selected?"var(--accent)":"var(--border2)"),background:selected?"var(--accent)":"var(--bg2)",color:"var(--on-accent)",display:"grid",placeItems:"center"}}>{selected&&<Icon name="check" size={11} style={{strokeWidth:3}}/>}</span>}
       <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:1}}>
         <span className="code">{appt.courseCode}{appt.section?` §${appt.section}`:""}</span>
@@ -596,7 +596,7 @@ function ExportDropdown({state,filterGroups=[]}) {
           background:"var(--bg3)",border:"1px solid var(--border2)",borderRadius:"var(--r2)",
           minWidth:220,boxShadow:"var(--shadow)",overflow:"hidden"}}>
           <div style={{padding:"8px 12px",borderBottom:"1px solid var(--border)",
-            fontSize:11.5,color:"var(--muted)",fontWeight:600,textTransform:"uppercase",letterSpacing:"0.08em"}}>
+            fontSize:13,color:"var(--muted)",fontWeight:600}}>
             Export Cohort Timetable
           </div>
           {targets.length===0&&(
@@ -763,11 +763,11 @@ function ScheduleTab({state,onApptClick,onCellClick,conflicts,onMove,onDeleteMan
             <table className="sheet">
               <thead>
                 <tr>
-                  <th className="period" style={{background:"var(--bg3)"}}><span className="sr-only">Period</span></th>
+                  <th className="period"><span className="sr-only">Period</span></th>
                   {days.map((d,di)=>{
                     const h=holidayOn(di);
                     return (
-                      <th key={di} style={{color:h?"var(--warn)":undefined}}>
+                      <th key={di} className={iso(slotDate(week1Start,selWeek,di))===iso(new Date())?"today":undefined} style={{color:h?"var(--warn)":undefined}}>
                         <div>{d}</div>
                         <div style={{fontFamily:"var(--mono)",fontSize:13,fontWeight:500,color:h?"var(--warn)":"var(--muted)"}}>{h?(h.name||"Holiday"):fmt(slotDate(week1Start,selWeek,di))}</div>
                       </th>
@@ -866,8 +866,8 @@ function DashboardTab({state,conflicts}) {
   const StatCard=({label,value,sub,color="var(--text)"})=>(
     <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",
       padding:"14px 16px",flex:1,minWidth:120}}>
-      <div style={{fontSize:11.5,color:"var(--muted)",textTransform:"uppercase",
-        letterSpacing:"0.08em",fontWeight:600,marginBottom:6}}>{label}</div>
+      <div style={{fontSize:13,color:"var(--muted)",
+  fontWeight:600,marginBottom:6}}>{label}</div>
       <div style={{fontSize:24,fontWeight:700,color,fontFamily:"var(--mono)",letterSpacing:"-0.02em"}}>
         {value}
       </div>
@@ -878,16 +878,11 @@ function DashboardTab({state,conflicts}) {
 
   return (
     <div style={{padding:16,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",height:"100%"}}>
-      <div style={{marginBottom:20}}>
-        <div style={{fontSize:16,fontWeight:700,marginBottom:4}}>Overview</div>
-        <div style={{color:"var(--muted)",fontSize:12.5}}>{state.settings.semester}</div>
-      </div>
-
       {/* Stat cards */}
       <div style={{display:"flex",gap:10,marginBottom:20,flexWrap:"wrap"}}>
-        <StatCard label="Total Sessions" value={totalSessions} sub={`across ${scheduledWeeks} weeks`}/>
+        <StatCard label="Total sessions" value={totalSessions} sub={`across ${scheduledWeeks} weeks`}/>
         <StatCard label="Conflicts" value={conflictCount}
-          color={conflictCount>0?"var(--danger)":"var(--accent)"}
+          color={conflictCount>0?"var(--danger)":"var(--ok)"}
           sub={conflictCount===0?"All clear":"Need attention"}/>
         <StatCard label="Instructors" value={instructors.length} sub={`${instructors.filter(i=>i.available).length} available`}/>
         <StatCard label="Rooms" value={rooms.length} sub={`${rooms.length} venues`}/>
@@ -897,8 +892,8 @@ function DashboardTab({state,conflicts}) {
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:20}}>
         {/* Sessions by day */}
         <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:14}}>
-          <div style={{fontSize:12.5,fontWeight:600,marginBottom:12,color:"var(--muted)"}}>
-            SESSIONS BY DAY
+          <div style={{fontSize:14,fontWeight:600,marginBottom:12,color:"var(--text)"}}>
+            Sessions by day
           </div>
           {byDay.map(({day,count})=>(
             <div key={day} style={{display:"flex",alignItems:"center",gap:8,marginBottom:7}}>
@@ -915,8 +910,8 @@ function DashboardTab({state,conflicts}) {
 
         {/* Instructor load */}
         <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:14}}>
-          <div style={{fontSize:12.5,fontWeight:600,marginBottom:12,color:"var(--muted)"}}>
-            INSTRUCTOR LOAD
+          <div style={{fontSize:14,fontWeight:600,marginBottom:12,color:"var(--text)"}}>
+            Instructor load
           </div>
           {byInstructor.map(i=>{
             const pct=i.maxLoad?Math.min((i.count/i.maxLoad)*100,100):0;
@@ -944,8 +939,8 @@ function DashboardTab({state,conflicts}) {
 
       {/* Course breakdown */}
       <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:14}}>
-        <div style={{fontSize:12.5,fontWeight:600,marginBottom:12,color:"var(--muted)"}}>
-          COURSE BREAKDOWN
+        <div style={{fontSize:14,fontWeight:600,marginBottom:12,color:"var(--text)"}}>
+          Course breakdown
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:8}}>
           {byCourse.map(c=>(
@@ -1169,8 +1164,8 @@ function CSVImportModal({state,setState,toast,onClose}) {
             {error&&<div style={{color:"var(--danger)",fontSize:12.5,marginBottom:12}}>{error}</div>}
             <div style={{background:"var(--bg3)",borderRadius:"var(--r)",padding:12,
               border:"1px solid var(--border)"}}>
-              <div style={{fontSize:11.5,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",
-                letterSpacing:"0.08em",marginBottom:8}}>Expected Format</div>
+              <div style={{fontSize:13,fontWeight:600,color:"var(--muted)",
+  marginBottom:8}}>Expected format</div>
               <pre style={{fontSize:11.5,fontFamily:"var(--mono)",color:"var(--muted)",
                 overflowX:"auto",lineHeight:1.6}}>
 {`Course Name,Course Code,Instructor,Student Groups,Category,Credits
@@ -1211,7 +1206,7 @@ Machine Learning,CS401,Prof. James Wright,Year 1 | Year 2,Elective,4`}
             <div style={{background:"var(--bg3)",borderRadius:"var(--r)",padding:10,
               border:"1px solid var(--border)",marginBottom:14,maxHeight:200,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain"}}>
               <div style={{fontSize:11.5,color:"var(--muted)",marginBottom:8,fontWeight:600,
-                textTransform:"uppercase",letterSpacing:"0.08em"}}>
+                }}>
                 Preview (first 5 rows)
               </div>
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:11.5}}>
@@ -1913,7 +1908,7 @@ function InstructorTab({state,onApptClick}) {
           <thead>
             <tr>
               <th style={{width:80,textAlign:"left",padding:"6px 8px",fontSize:11.5,color:"var(--muted)",
-                textTransform:"uppercase",letterSpacing:"0.08em",fontWeight:600}}>Slot</th>
+                fontWeight:600}}>Slot</th>
               {days.map((d,di)=>(
                 <th key={di} style={{textAlign:"left",padding:"6px 8px",fontSize:12.5,fontWeight:500}}>
                   <div>{d}</div>
@@ -1928,7 +1923,7 @@ function InstructorTab({state,onApptClick}) {
             {slots.map(slot=>(
               <tr key={slot.id}>
                 <td style={{verticalAlign:"top",padding:"6px 8px"}}>
-                  <div style={{fontSize:11.5,fontWeight:600,color:"var(--accent)",fontFamily:"var(--mono)"}}>{slot.short.toUpperCase()}</div>
+                  <div style={{fontSize:11.5,fontWeight:600,color:"var(--accent)",fontFamily:"var(--mono)"}}>{slot.short}</div>
                   <div style={{fontSize:11,color:"var(--muted2)"}}>{slot.label}</div>
                 </td>
                 {days.map((_,di)=>{
@@ -1975,7 +1970,7 @@ function ConflictsTab({conflicts,state,onApptClick,onFix}) {
   const grouped={instructor:[],room:[],group:[]};
   const open=conflicts.filter(c=>!c.overridden), resolved=conflicts.filter(c=>c.overridden);
   open.forEach(c=>{ if(grouped[c.type]) grouped[c.type].push(c); });
-  const typeLabel={instructor:"Instructor Conflicts",room:"Room Conflicts",group:"Group Conflicts"};
+  const typeLabel={instructor:"Instructor clashes",room:"Room clashes",group:"Group clashes"};
   const typeColor={instructor:"var(--danger)",room:"var(--warn)",group:"var(--accent2)"};
 
   const renderCard=(c,i)=>{
@@ -1987,7 +1982,7 @@ function ConflictsTab({conflicts,state,onApptClick,onFix}) {
                 borderRadius:"var(--r2)",padding:"10px 12px",marginBottom:8}}>
                 <div style={{fontSize:11.5,color:"var(--muted)",marginBottom:6,fontFamily:"var(--mono)"}}>
                   {weekLabel} · {dayLabel} · {slotLabel}
-                  {c.overridden&&<span style={{marginLeft:8,color:"var(--accent)",fontWeight:700}}>✓ Overridden · {typeLabel[c.type].replace(" Conflicts","").toLowerCase()} clash accepted</span>}
+                  {c.overridden&&<span style={{marginLeft:8,color:"var(--accent)",fontWeight:700}}>✓ Overridden · {typeLabel[c.type].replace(" clashes","").toLowerCase()} clash accepted</span>}
                 </div>
                 <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
                   {[c.a,c.b].map((appt,j)=>{
@@ -2038,13 +2033,13 @@ function ConflictsTab({conflicts,state,onApptClick,onFix}) {
   return (
     <div style={{padding:16,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain",height:"100%"}}>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}>
-        <div style={{fontSize:14,fontWeight:700}}>Conflict Report</div>
+        <div style={{fontSize:14,fontWeight:700}}>All conflicts</div>
         {open.length>0?<Badge color="red">{open.length} unresolved</Badge>:<Badge color="green">All resolved</Badge>}
         {resolved.length>0&&<Badge color="muted">{resolved.length} overridden</Badge>}
       </div>
       {Object.entries(grouped).filter(([,v])=>v.length).map(([type,items])=>(
         <div key={type} style={{marginBottom:16}}>
-          <div style={{fontSize:11.5,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.1em",
+          <div style={{fontSize:13,fontWeight:700,
             color:typeColor[type]||"var(--muted)",marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
             <span style={{width:6,height:6,borderRadius:"50%",background:typeColor[type],display:"inline-block"}}/>
             {typeLabel[type]} ({items.length})
@@ -2054,7 +2049,7 @@ function ConflictsTab({conflicts,state,onApptClick,onFix}) {
       ))}
       {resolved.length>0&&(
         <div style={{marginBottom:16}}>
-          <div style={{fontSize:11.5,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.1em",color:"var(--accent)",marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
+          <div style={{fontSize:13,fontWeight:700,color:"var(--accent)",marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
             <Icon name="check" size={14}/>Resolved by override ({resolved.length})
           </div>
           {resolved.map(renderCard)}
@@ -2160,8 +2155,8 @@ function SettingsTab({state,setState,toast}) {
       <div style={{fontSize:14,fontWeight:700,marginBottom:20}}>Settings</div>
 
       <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:16,marginBottom:16}}>
-        <div style={{fontSize:12.5,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",
-          letterSpacing:"0.08em",marginBottom:12}}>Institution</div>
+        <div style={{fontSize:13.5,fontWeight:600,color:"var(--muted)",
+  marginBottom:12}}>Institution</div>
         <Field label="Institution Name">
           <input value={form.institution} onChange={e=>setForm(f=>({...f,institution:e.target.value}))}/>
         </Field>
@@ -2175,7 +2170,7 @@ function SettingsTab({state,setState,toast}) {
 
       <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:16,marginBottom:16}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
-          <div style={{fontSize:12.5,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.08em"}}>
+          <div style={{fontSize:13.5,fontWeight:600,color:"var(--muted)"}}>
             Time Slots
           </div>
           <Btn variant="outline" size="xs" onClick={addSlot}>+ Add Slot</Btn>
@@ -2194,7 +2189,7 @@ function SettingsTab({state,setState,toast}) {
 
       <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:16,marginBottom:16}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
-          <div style={{fontSize:12.5,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.08em"}}>Holidays</div>
+          <div style={{fontSize:13.5,fontWeight:600,color:"var(--muted)"}}>Holidays</div>
           <Btn variant="outline" size="xs" onClick={addHoliday}>+ Add Holiday</Btn>
         </div>
         {state.holidays.map(h=>(
@@ -2210,8 +2205,8 @@ function SettingsTab({state,setState,toast}) {
       <Btn variant="primary" onClick={save} style={{marginBottom:20}}>Save Settings</Btn>
 
       <div style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:16}}>
-        <div style={{fontSize:12.5,fontWeight:600,color:"var(--muted)",textTransform:"uppercase",
-          letterSpacing:"0.08em",marginBottom:12}}>Data Management</div>
+        <div style={{fontSize:13.5,fontWeight:600,color:"var(--muted)",
+  marginBottom:12}}>Data management</div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
           <Btn variant="outline" onClick={exportData}><Icon name="download" size={15}/> Export JSON</Btn>
           <Btn variant="outline" onClick={()=>importRef.current?.click()}>Import JSON</Btn>

@@ -164,7 +164,7 @@ function PlanRow({ row, state, canEdit, open, onToggle, stale, onRenumber, onTar
             {extras.length > 0 && <span style={{ color: "var(--muted)" }}>+{extras.length} extra</span>}
           </span>
           <span aria-hidden="true" style={{ display: "block", height: 6, borderRadius: 99, background: "var(--bg4)", overflow: "hidden" }}>
-            <span style={{ display: "block", height: "100%", width: `${pct}%`, background: missing > 0 ? "var(--danger)" : over > 0 ? "var(--warn)" : "var(--accent)" }} />
+            <span style={{ display: "block", height: "100%", width: `${pct}%`, background: missing > 0 ? "var(--danger)" : over > 0 ? "var(--signal)" : "var(--ok)" }} />
           </span>
         </span>
         <span style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "flex-end", flex: "0 0 190px" }}>
