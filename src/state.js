@@ -1,4 +1,5 @@
 import { migrateSections, sectionsOf, cleanSection } from "./sections.js";
+import { numberSessions } from "./plan.js";
 // App state: seed data, sanitising loaded data, and the browser-local storage helpers.
 import { iso, mondayOf } from "./dates.js";
 import { DEFAULT_SLOTS } from "./constants.js";
@@ -60,7 +61,7 @@ export function sanitizeState(s) {
   Object.entries(s.appointments||{}).forEach(([k,v])=>{
     appointments[k] = sanitizeAppt(v);
   });
-  return migrateSections({
+  return numberSessions(migrateSections({
     ...s,
     appointments,
     instructors: (s.instructors||[]).map(i=>({...i,availability:i.availability||{}})),
@@ -71,7 +72,7 @@ export function sanitizeState(s) {
     changelog:   s.changelog  || [],
     slots:       s.slots      || [{id:"am",label:"09:00 – 12:00",short:"Morning"},{id:"pm",label:"13:00 – 16:00",short:"Afternoon"},{id:"ev",label:"17:00 – 20:00",short:"Evening"}],
     settings:    s.settings   || {institution:"",semester:"",logo:""},
-  });
+  }));
 }
 
 // Terms this browser has opened before (kept on this device, and for signed-in people also in their account).

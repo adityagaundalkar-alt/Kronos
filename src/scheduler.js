@@ -286,6 +286,7 @@ function commitSession(ctx, week, dayIdx, timeId, freeRooms, lastRoomId, makeId,
     instructorId: job.instructorId || "", roomId: room.id,
     groupIds: [...(job.groupIds || [])], notes: "",
     ...(job.sectionId && !job.custom ? { sectionId: job.sectionId, section: job.sectionName || "" } : {}),
+    ...(job.kind === "extra" && !job.custom ? { kind: "extra" } : {}),
   };
   ctx.index.add(appt);
   return appt;
@@ -318,7 +319,7 @@ export function runAutoSchedule(state, jobs, { makeId = randomId } = {}) {
     // Replace mode: lift this course's unlocked sessions out of the way first (restored per week if nothing replaces them).
     const lifted = [];
     if (job.replaceExisting) {
-      Object.values(state.appointments || {}).filter(a => a && (job.custom ? (!a.courseId && a.courseName === course.name) : (a.courseId === job.courseId && (a.sectionId || "") === (job.sectionId || ""))) && !a.locked && weeks.includes(a.weekNum))
+      Object.values(state.appointments || {}).filter(a => a && (job.custom ? (!a.courseId && a.courseName === course.name) : (a.courseId === job.courseId && (a.sectionId || "") === (job.sectionId || "") && (a.kind === "extra") === (job.kind === "extra"))) && !a.locked && weeks.includes(a.weekNum))
         .forEach(a => { lifted.push(a); index.remove(a); });
     }
 
@@ -475,7 +476,7 @@ export function slotOptions(state, job) {
       const ev = evaluate(ctx, w, c.dayIdx, c.timeId);
       const load = wanted.length ? index.day(w, c.dayIdx).filter(a => !siblingSection(job, a) && (a.groupIds || []).some(g => wanted.includes(g))).length : 0;
       const rooms = ev.ok ? ev.freeRooms.map(r => r.name) : [];
-      byWeek[w] = { ok: ev.ok, rooms, load };
+      byWeek[w] = { ok: ev.ok, rooms, roomIds: ev.ok ? ev.freeRooms.map(r => r.id) : [], load };
       if (ev.ok) { free++; roomsAll = roomsAll ? roomsAll.filter(n => rooms.includes(n)) : rooms; }
       else blocked.push({ weekNum: w, holiday: ev.reasons.length === 1 && ev.reasons[0].code === "holiday", codes: ev.reasons.map(r => r.code) });
     }
