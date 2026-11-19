@@ -46,6 +46,7 @@ export default function CoursePlan({ state, setState, canEdit, toast, onApptClic
   }
 
   return (
+    <div style={{ padding: 16, overflowY: "auto", minHeight: 0, height: "100%", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }}>
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div>
         <p style={{ ...muted, fontSize: 14.5, lineHeight: 1.5, maxWidth: 720, margin: 0 }}>
@@ -104,6 +105,7 @@ export default function CoursePlan({ state, setState, canEdit, toast, onApptClic
         </>
       )}
     </div>
+    </div>
   );
 }
 
@@ -127,7 +129,7 @@ function CoursePicker({ courses, setCourse, setState }) {
           <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", border: "1px solid var(--border)", borderRadius: "var(--r)", background: c.running ? "var(--accent-soft)" : "transparent" }}>
             <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0, cursor: "pointer" }}>
               <input type="checkbox" checked={!!c.running} onChange={e => setCourse(c.id, { running: e.target.checked }, "chose running courses", c.code)} />
-              <span style={{ font: "600 13px var(--mono)" }}>{c.code}</span>
+              <span style={{ font: "600 13px var(--mono)", whiteSpace: "nowrap", flexShrink: 0 }}>{c.code}</span>
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</span>
             </label>
             <input type="number" min="1" max="60" value={c.targetSessions || ""} placeholder={String(DEFAULT_TARGET)} aria-label={`Lectures needed for ${c.code}`} title="Lectures needed"
@@ -156,7 +158,7 @@ function PlanRow({ row, state, canEdit, open, onToggle, stale, onRenumber, onTar
           <span style={{ fontWeight: 600, marginLeft: 8 }}>{course.name}</span>
           <span style={{ display: "block", ...muted }}>{instr ? instr.name : "No instructor set"}</span>
         </span>
-        <span style={{ flex: "0 1 220px", minWidth: 160 }}>
+        <span style={{ flex: "0 0 220px" }}>
           <span style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
             <span><b>{lectures.length}</b> of {target} lectures</span>
             {extras.length > 0 && <span style={{ color: "var(--muted)" }}>+{extras.length} extra</span>}
@@ -165,7 +167,7 @@ function PlanRow({ row, state, canEdit, open, onToggle, stale, onRenumber, onTar
             <span style={{ display: "block", height: "100%", width: `${pct}%`, background: missing > 0 ? "var(--danger)" : over > 0 ? "var(--warn)" : "var(--accent)" }} />
           </span>
         </span>
-        <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <span style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "flex-end", flex: "0 0 190px" }}>
           {status}
           {pace.issues > 0 && <span className="pill warn" title="Gaps, crowded weeks or lectures on holidays">Pace</span>}
           <Icon name={open ? "up" : "down"} size={16} style={{ color: "var(--muted)" }} />
