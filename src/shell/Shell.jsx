@@ -6,6 +6,7 @@ export const VIEWS = [
   { id: "schedule",     icon: "schedule",  label: "Schedule",      group: "plan" },
   { id: "dashboard",    icon: "dashboard", label: "Overview",      group: "plan" },
   { id: "autoschedule", icon: "wand",      label: "Auto-schedule", group: "plan", need: "edit", sub: "Find clash-free times for whole courses at once" },
+  { id: "plan",         icon: "check",     label: "Course plan",   group: "plan", sub: "Does every course have all its lectures?" },
   { id: "courses",      icon: "courses",   label: "Courses",       group: "data", need: "edit" },
   { id: "assets",       icon: "assets",    label: "Instructors & rooms", group: "data", need: "edit", title: "Instructors, rooms and groups" },
   { id: "instructor",   icon: "person",    label: "By instructor", group: "data", sub: "One person's week at a glance" },

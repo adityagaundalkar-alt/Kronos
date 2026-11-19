@@ -18,6 +18,8 @@ import { suggestFixes } from "./fixes.js";
 import { askConfirm, ConfirmProvider } from "./ui/Confirm.jsx";
 import { buildGroupTree } from "./groups.js";
 import { sectionsOf, blankSection, sectionId } from "./sections.js";
+import { numberSessions, newlyOutOfOrder, renumber, sessionLabel, runningCourses, isExtra, buildPlan } from "./plan.js";
+import CoursePlan from "./features/CoursePlan.jsx";
 import { changesBetween, applyChanges, invert, MAX_HISTORY } from "./history.js";
 import GroupPicker from "./ui/GroupPicker.jsx";
 import SearchSelect from "./ui/SearchSelect.jsx";
@@ -74,10 +76,10 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
   function pickSection(id) {
     const c=courses.find(x=>x.id===form.courseId);
     const sc=sectionsOf(c).find(x=>x.id===id);
-    setForm(f=>sc?{...f,sectionId:sc.id,section:sc.name,
+    setForm(f=>sc?{...f,num:"",sectionId:sc.id,section:sc.name,
       instructorId:sc.instructorId||c.defaultInstructorId||"",
       groupIds:sc.groupIds?.length?sc.groupIds:(c.defaultGroupIds||[]),
-      roomId:sc.roomId||f.roomId||""}:{...f,sectionId:"",section:""});
+      roomId:sc.roomId||f.roomId||""}:{...f,num:"",sectionId:"",section:""});
   }
 
   // Optional custom start/end inside the slot (e.g. 10:00-11:30 in a 09:00-12:00 slot)
@@ -102,6 +104,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
   // What a repeat would save, with the weeks it has to skip.
   const plan=useMemo(()=>repeat.every>0&&!isEdit?planRepeat({appointments,slots,holidays:state.holidays,week1Start:state.week1Start},{...effective,overrides:[...new Set(conflicts.map(c=>c.type))].filter(t=>overrides[t])},{every:repeat.every,until:Math.max(repeat.until,form.weekNum),newId:uid}):null,[repeat,effective,appointments,slots,overrides,conflicts,isEdit,state.holidays,state.week1Start,form.weekNum]);
 
+  const selCourseNow=courses.find(x=>x.id===form.courseId);
   function handleSave() {
     if(!hasWhat||form.weekNum===undefined) return;
     if(deletedRemotely) return; // someone else deleted it - saving would silently resurrect it
@@ -109,7 +112,12 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
     const course=courses.find(x=>x.id===form.courseId);
     if(!timesCheck.ok) return;
     const base={...effective,courseName:other?(form.courseName||"").trim():course?.name,courseCode:other?((form.courseCode||"").trim()||"EXTRA"):course?.code,section:form.section||"",sectionId:form.sectionId||""};
-    if(other) base.courseId="";
+    if(other) { base.courseId=""; delete base.kind; delete base.num; }
+    else {
+      if(base.kind!=="extra") delete base.kind;
+      const n=parseInt(form.num,10);
+      if(n>0&&!(repeat.every>0&&!isEdit)) base.num=n; else delete base.num; // empty: numbered automatically by date
+    }
     // Remember which clashes were knowingly overridden, so they show as resolved (but still tracked) in Conflicts.
     const kept=[...new Set(conflicts.map(c=>c.type))].filter(t=>overrides[t]);
     if(kept.length) base.overrides=kept; else delete base.overrides;
@@ -151,9 +159,9 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
         <fieldset disabled={readOnly} style={{border:0,padding:0,margin:0,minWidth:0}}>
         {/* Course */}
         <Field label="Course" required>
-          <SearchSelect value={other?"__other":form.courseId} placeholder="— Select course —" options={[...courses.map(c=>({value:c.id,label:`[${c.code}] ${c.name}`})),{value:"__other",label:"Other event (extra class, workshop, exam…)"}]} onChange={v=>{
+          <SearchSelect value={other?"__other":form.courseId} placeholder="— Select course —" options={[...(rc=>selCourseNow&&!rc.includes(selCourseNow)?[...rc,selCourseNow]:rc)(runningCourses(courses)).map(c=>({value:c.id,label:`[${c.code}] ${c.name}`})),{value:"__other",label:"Other event (extra class, workshop, exam…)"}]} onChange={v=>{
             if(v==="__other"){setOther(true);setForm(f=>({...f,courseId:"",instructorId:"",groupIds:[],sectionId:"",section:""}));}
-            else{setOther(false);setForm(f=>{const n={...f,courseId:v,instructorId:"",groupIds:[],sectionId:"",section:""};delete n.courseName;delete n.courseCode;return n;});}
+            else{setOther(false);setForm(f=>{const n={...f,courseId:v,instructorId:"",groupIds:[],sectionId:"",section:"",num:""};delete n.courseName;delete n.courseCode;return n;});}
           }}/>
         </Field>
         {other&&(
@@ -240,6 +248,25 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
         <Field label="Student Groups">
           <GroupPicker groups={groups} value={form.groupIds} onChange={v=>setForm(f=>({...f,groupIds:v}))} placeholder="Select groups..."/>
         </Field>
+
+        {/* Type + session number */}
+        {!other&&form.courseId&&(
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
+            <Field label="Type" hint="Extra classes don't count towards the course's lectures">
+              <select value={form.kind==="extra"?"extra":"lecture"} onChange={e=>setForm(f=>({...f,kind:e.target.value==="extra"?"extra":undefined,num:""}))}>
+                <option value="lecture">Lecture</option>
+                <option value="extra">Extra class</option>
+              </select>
+            </Field>
+            <Field label={form.kind==="extra"?"Extra class number":"Session number"} hint="Leave empty to number by date">
+              <div style={{display:"flex",alignItems:"center",gap:6}}>
+                <span style={{font:"600 14px var(--mono)",color:"var(--muted)"}}>{form.kind==="extra"?"E":"S"}</span>
+                <input type="number" min="1" inputMode="numeric" value={form.num??""} aria-label="Session number"
+                  onChange={e=>setForm(f=>({...f,num:e.target.value}))} placeholder="auto" style={{width:"100%"}}/>
+              </div>
+            </Field>
+          </div>
+        )}
 
         {/* Section + Notes */}
         <div style={{display:"grid",gridTemplateColumns:"1fr 2fr",gap:8,marginBottom:12}}>
@@ -365,6 +392,7 @@ function ApptChip({appt,courses,instructors,rooms,onClick,conflicts=[],selectabl
       {selectable&&<span aria-hidden="true" style={{position:"absolute",top:3,right:4,width:16,height:16,borderRadius:4,border:"1.5px solid "+(selected?"var(--accent)":"var(--border2)"),background:selected?"var(--accent)":"var(--bg2)",color:"var(--on-accent)",display:"grid",placeItems:"center"}}>{selected&&<Icon name="check" size={11} style={{strokeWidth:3}}/>}</span>}
       <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:1}}>
         <span className="code">{appt.courseCode}{appt.section?` §${appt.section}`:""}</span>
+        {sessionLabel(appt)&&<span title={isExtra(appt)?`Extra class ${appt.num}`:`Session ${appt.num}`} style={{fontSize:11,fontWeight:700,fontFamily:"var(--mono)",padding:"0 4px",borderRadius:4,border:"1px solid currentColor",opacity:.85}}>{sessionLabel(appt)}</span>}
         {customLabel(appt)&&<span title="Custom time" style={{fontSize:11.5,fontFamily:"var(--mono)",color:"var(--muted)"}}>{customLabel(appt)}</span>}
         <span style={{flex:1}}/>
         {appt.locked&&<span title="Pinned: auto-schedule won't move it" style={{display:"inline-flex"}}><Icon name="lock" size={13}/></span>}
@@ -448,7 +476,7 @@ function exportCohortHTML(state, groupId) {
           const instr=instructors.find(x=>x.id===cell.instructorId);
           const room=rooms.find(x=>x.id===cell.roomId);
           return {pal,html:`
-          <div class="code" style="color:${pal.accent}">${esc(cell.courseCode)}${cell.section?` §${esc(cell.section)}`:""}</div>
+          <div class="code" style="color:${pal.accent}">${esc(cell.courseCode)}${cell.section?` §${esc(cell.section)}`:""}${sessionLabel(cell)?` · ${sessionLabel(cell)}`:""}</div>
           ${customLabel(cell)?`<div class="meta">${esc(customLabel(cell))}</div>`:""}
           <div class="name">${esc(cell.courseName)}</div>
           ${instr?`<div class="meta">${esc(instr.name)}</div>`:""}
@@ -524,7 +552,7 @@ function exportCohortCSV(state, groupId) {
   if(!sel.groups.length) return;
   const order=slots.map(x=>x.id);
   const appts=[...sel.appts].sort((a,b)=>a.weekNum-b.weekNum||a.dayIdx-b.dayIdx||order.indexOf(a.timeId)-order.indexOf(b.timeId));
-  const rows=[["Week","Day","Slot","Time","Course Code","Section","Course Name","Instructor","Room","All Groups"]];
+  const rows=[["Week","Day","Slot","Time","Course Code","Section","Session","Course Name","Instructor","Room","All Groups"]];
   appts.forEach(a=>{
     const instr=instructors.find(x=>x.id===a.instructorId)?.name||"";
     const room=rooms.find(x=>x.id===a.roomId)?.name||"";
@@ -532,7 +560,7 @@ function exportCohortCSV(state, groupId) {
     const slotLabel=timeLabel(a,slots);
     rows.push([WEEKS.find(w=>w.n===a.weekNum)?.label||`W${a.weekNum}`,
       DAYS_FULL[a.dayIdx],a.timeId.toUpperCase(),slotLabel,
-      a.courseCode||"",a.section||"",a.courseName||"",instr,room,grps]);
+      a.courseCode||"",a.section||"",sessionLabel(a),a.courseName||"",instr,room,grps]);
   });
   const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
   const blob=new Blob([csv],{type:"text/csv"});
@@ -1827,12 +1855,12 @@ function InstructorTab({state,onApptClick}) {
 
   function downloadCSV() {
     const all=Object.values(appointments).filter(a=>a.instructorId===selInstructor);
-    const rows=[["Week","Day","Slot","Course","Code","Section","Room","Groups"]];
+    const rows=[["Week","Day","Slot","Course","Code","Section","Session","Room","Groups"]];
     all.sort((a,b)=>a.weekNum-b.weekNum||a.dayIdx-b.dayIdx).forEach(a=>{
       const room=rooms.find(r=>r.id===a.roomId)?.name||"TBD";
       const grps=a.groupIds?.map(g=>groups.find(x=>x.id===g)?.name).filter(Boolean).join(", ")||"";
       rows.push([WEEKS.find(w=>w.n===a.weekNum)?.label||a.weekNum,DAYS_FULL[a.dayIdx],
-        timeLabel(a,slots),a.courseName,a.courseCode,a.section||"",room,grps]);
+        timeLabel(a,slots),a.courseName,a.courseCode,a.section||"",sessionLabel(a),room,grps]);
     });
     const csv=rows.map(r=>r.map(c=>`"${c}"`).join(",")).join("\n");
     const a=document.createElement("a");
@@ -2288,8 +2316,9 @@ function Builder() {
   const setState = useCallback((updater, opType, opDetail) => {
     if (!canEditRef.current) { toast.push(collabRef.current?.archived ? "This term is archived, so it can't be changed. An admin can reopen it." : "You have view-only access to this term.", "info"); return; }
     const prev = stateRef.current;
-    const next = typeof updater === "function" ? updater(prev) : updater;
+    let next = typeof updater === "function" ? updater(prev) : updater;
     if (next === prev) return;
+    next = numberSessions(next); // new lectures get S-numbers by date
     commit(next);
     collab.pushDiff(prev, next, opType, opDetail);
     const changes = changesBetween(prev, next);
@@ -2299,7 +2328,29 @@ function Builder() {
       redoStack.current = [];
       setHistoryTick(t => t + 1);
     }
+    // A move that puts lectures out of date order: ask whether to renumber them (only once per change).
+    if (opType !== "renumbered sessions") {
+      const keys = newlyOutOfOrder(prev, next);
+      if (keys.size) setTimeout(() => askRenumberRef.current?.(keys), 0);
+    }
   }, [commit, collab.pushDiff, toast.push]);
+
+  const askRenumberRef = useRef(null);
+  askRenumberRef.current = async keys => {
+    const st = stateRef.current;
+    const names = [...keys].map(k => {
+      const [cid, sid, kind] = k.split("|");
+      const c = st.courses.find(x => x.id === cid);
+      const sec = sid ? sectionsOf(c).find(x => x.id === sid)?.name : "";
+      return `${c?.code || "A course"}${sec ? " §" + sec : ""}${kind === "extra" ? " extra classes" : ""}`;
+    });
+    const ok = await askConfirm({
+      title: "Renumber the sessions?",
+      message: `The session numbers of ${names.join(", ")} are no longer in date order. Renumber them S1, S2 … by date?`,
+      confirmLabel: "Renumber", cancelLabel: "Keep numbers", danger: false,
+    });
+    if (ok) setState(s => renumber(s, keys), "renumbered sessions", names.join(", "));
+  };
 
   // Undo / redo: your own changes only, newest first. Items a teammate has touched since are left alone.
   const stepHistory = useCallback(dir => {
@@ -2337,6 +2388,7 @@ function Builder() {
 
   const conflicts = useMemo(() => getAllConflicts(state.appointments || {}, state.slots), [state.appointments, state.slots]);
   const openConflicts = useMemo(() => conflicts.filter(c => !c.overridden), [conflicts]);
+  const planShort = useMemo(() => buildPlan(state).rows.filter(r => r.missing > 0).length, [state]);
 
   // Signing in or out changes our database identity; room access is tied to it, so join again with the same code.
   const lastUid = useRef(null);
@@ -2532,7 +2584,7 @@ function Builder() {
 
   const conflictCount = openConflicts.length;
   const openComments = Object.values(collab.comments.open || {}).reduce((a, b) => a + b, 0);
-  const counts = { conflicts: conflictCount, comments: openComments };
+  const counts = { conflicts: conflictCount, comments: openComments, plan: planShort };
   const current = VIEWS.find(v => v.id === tab) || VIEWS[0];
   const subtitle = tab === "schedule"
     ? `${state.settings.semester || (session ? "Term" : "This device only")}${session?.archived ? " · archived, read-only" : canEdit ? "" : " · view only"}`
@@ -2576,6 +2628,7 @@ function Builder() {
             {tab === "schedule" && <ScheduleTab state={state} onApptClick={handleApptClick} onCellClick={handleCellClick} conflicts={openConflicts} onMove={moveSessions} onDeleteMany={deleteSessions} />}
             {tab === "dashboard" && <DashboardTab state={state} conflicts={openConflicts} />}
             {tab === "autoschedule" && canEdit && <AutoScheduleTab state={state} setState={setState} toast={toast.push} />}
+            {tab === "plan" && <CoursePlan state={state} setState={setState} canEdit={canEdit} toast={toast.push} onApptClick={handleApptClick} />}
             {tab === "courses" && canEdit && <CoursesTab state={state} setState={setState} toast={toast.push} />}
             {tab === "assets" && canEdit && <AssetsTab state={state} setState={setState} toast={toast.push} />}
             {tab === "instructor" && <InstructorTab state={state} onApptClick={handleApptClick} />}

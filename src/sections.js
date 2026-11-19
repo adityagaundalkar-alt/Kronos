@@ -12,7 +12,7 @@ export const blankSection = (courseId, name = "") => ({ id: courseId && name ? s
 export const sectionsOf = course => (course && Array.isArray(course.sections) ? course.sections.filter(s => s && s.id) : []);
 
 export function cleanSection(s) {
-  return { id: s.id, name: s.name || "", instructorId: s.instructorId || "", groupIds: Array.isArray(s.groupIds) ? s.groupIds : [], roomId: s.roomId || "", roomType: s.roomType || "" };
+  return { id: s.id, name: s.name || "", instructorId: s.instructorId || "", groupIds: Array.isArray(s.groupIds) ? s.groupIds : [], roomId: s.roomId || "", roomType: s.roomType || "", ...(Number(s.target) > 0 ? { target: Number(s.target) } : {}) };
 }
 
 const mostCommon = (items, keyOf = x => x) => {

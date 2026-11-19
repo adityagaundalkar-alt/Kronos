@@ -8,6 +8,9 @@ import { askConfirm } from "../ui/Confirm.jsx";
 import GroupPicker from "../ui/GroupPicker.jsx";
 import SearchSelect from "../ui/SearchSelect.jsx";
 import { sectionsOf } from "../sections.js";
+import { runningCourses } from "../plan.js";
+
+const withCurrent = (list, current) => (current && !list.includes(current) ? [...list, current] : list);
 import AvailabilityGrid from "./AvailabilityGrid.jsx";
 
 const MODES = [
@@ -174,8 +177,16 @@ function JobCard({ job, ji, state, onUpdate, onRemove, onToggle, onInstructorAva
         <div style={{ padding: 16 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "0 14px" }}>
             <Field label="Course" required>
-              <SearchSelect value={job.custom ? "__other" : job.courseId} onChange={pickCourse} placeholder="Choose a course…" options={[...courses.map(c => ({ value: c.id, label: `${c.code}  ${c.name}` })), { value: "__other", label: "Other event (extra class, workshop, exam…)" }]} />
+              <SearchSelect value={job.custom ? "__other" : job.courseId} onChange={pickCourse} placeholder="Choose a course…" options={[...withCurrent(runningCourses(courses), course).map(c => ({ value: c.id, label: `${c.code}  ${c.name}` })), { value: "__other", label: "Other event (extra class, workshop, exam…)" }]} />
             </Field>
+            {course && !job.custom && (
+              <Field label="Type" hint="Extra classes don't count towards the course's lectures">
+                <select value={job.kind === "extra" ? "extra" : "lecture"} onChange={e => onUpdate({ kind: e.target.value === "extra" ? "extra" : "" })}>
+                  <option value="lecture">Lecture</option>
+                  <option value="extra">Extra class</option>
+                </select>
+              </Field>
+            )}
             {secs.length > 0 && (
               <Field label="Section" hint="Each section is scheduled on its own">
                 <select value={job.sectionId || ""} onChange={e => pickSection(e.target.value)}>

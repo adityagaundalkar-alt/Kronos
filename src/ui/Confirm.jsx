@@ -30,7 +30,7 @@ export function ConfirmProvider({ children }) {
             </label>
           )}
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
-            <Btn variant="outline" onClick={() => done(false)}>Cancel</Btn>
+            <Btn variant="outline" onClick={() => done(false)}>{req.cancelLabel || "Cancel"}</Btn>
             <Btn variant={req.danger === false ? "primary" : "danger"} disabled={!!req.typeToConfirm && typed.trim() !== req.typeToConfirm} onClick={() => done(true)}>{req.confirmLabel || "Delete"}</Btn>
           </div>
         </Modal>
