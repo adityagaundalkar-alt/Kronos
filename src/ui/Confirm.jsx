@@ -20,8 +20,9 @@ export function ConfirmProvider({ children }) {
     <ConfirmCtx.Provider value={confirm}>
       {children}
       {req && (
-        <Modal title={req.title || "Are you sure?"} onClose={() => done(false)} width={440}>
-          <div style={{ fontSize: 14.5, lineHeight: 1.5, marginBottom: 18 }}>{req.message}</div>
+        <Modal title={req.title || "Are you sure?"} onClose={() => done(false)} width={460}>
+          <div style={{ padding: 20 }}>
+          <div style={{ fontSize: 14.5, lineHeight: 1.55, marginBottom: 20 }}>{req.message}</div>
           {req.detail && <div className="callout warn" style={{ marginBottom: 18 }}>{req.detail}</div>}
           {req.typeToConfirm && (
             <label style={{ display: "block", fontSize: 14, marginBottom: 18 }}>
@@ -32,6 +33,7 @@ export function ConfirmProvider({ children }) {
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
             <Btn variant="outline" onClick={() => done(false)}>{req.cancelLabel || "Cancel"}</Btn>
             <Btn variant={req.danger === false ? "primary" : "danger"} disabled={!!req.typeToConfirm && typed.trim() !== req.typeToConfirm} onClick={() => done(true)}>{req.confirmLabel || "Delete"}</Btn>
+          </div>
           </div>
         </Modal>
       )}
