@@ -51,7 +51,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
   const [other,setOther]=useState(()=>!!(isEdit&&!appt.courseId&&appt.courseName));
   const hasWhat=!!form.courseId||(other&&!!(form.courseName||"").trim());
   const [confirmDelete,setConfirmDelete]=useState(false);
-  const [overrides,setOverrides]=useState(()=>({instructor:false,room:false,group:false,...Object.fromEntries((isEdit&&Array.isArray(appt.overrides)?appt.overrides:[]).map(t=>[t,true]))}));
+  const [overrides,setOverrides]=useState(()=>({instructor:false,room:false,group:false,overlap:false,...Object.fromEntries((isEdit&&Array.isArray(appt.overrides)?appt.overrides:[]).map(t=>[t,true]))}));
 
   // Collaboration awareness: who else has this session open, and did it change underneath us?
   const {editing}=useContext(PresenceCtx);
@@ -99,10 +99,10 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
     return useCustom?{...rest,start,end}:rest;
   },[form,useCustom]);
 
-  const conflicts=useMemo(()=>checkConflicts(appointments,effective,slots,isEdit?appt.id:null),[effective,appointments,slots]);
+  const conflicts=useMemo(()=>checkConflicts(appointments,effective,slots,isEdit?appt.id:null,state.groups),[effective,appointments,slots,state.groups]);
   const blockingConflicts=conflicts.filter(c=>!overrides[c.type]);
   // What a repeat would save, with the weeks it has to skip.
-  const plan=useMemo(()=>repeat.every>0&&!isEdit?planRepeat({appointments,slots,holidays:state.holidays,week1Start:state.week1Start},{...effective,overrides:[...new Set(conflicts.map(c=>c.type))].filter(t=>overrides[t])},{every:repeat.every,until:Math.max(repeat.until,form.weekNum),newId:uid}):null,[repeat,effective,appointments,slots,overrides,conflicts,isEdit,state.holidays,state.week1Start,form.weekNum]);
+  const plan=useMemo(()=>repeat.every>0&&!isEdit?planRepeat({appointments,slots,groups:state.groups,holidays:state.holidays,week1Start:state.week1Start},{...effective,overrides:[...new Set(conflicts.map(c=>c.type))].filter(t=>overrides[t])},{every:repeat.every,until:Math.max(repeat.until,form.weekNum),newId:uid}):null,[repeat,effective,appointments,slots,overrides,conflicts,isEdit,state.holidays,state.week1Start,form.weekNum]);
 
   const selCourseNow=courses.find(x=>x.id===form.courseId);
   function handleSave() {
@@ -123,7 +123,7 @@ function ApptModal({appt,weekNum,dayIdx,timeId,state,onSave,onClose,onDelete,rea
     if(kept.length) base.overrides=kept; else delete base.overrides;
     const toSave=[];
     if(repeat.every>0&&!isEdit) {
-      const real=planRepeat({appointments,slots,holidays:state.holidays,week1Start:state.week1Start},base,{every:repeat.every,until:Math.max(repeat.until,form.weekNum),newId:uid});
+      const real=planRepeat({appointments,slots,groups:state.groups,holidays:state.holidays,week1Start:state.week1Start},base,{every:repeat.every,until:Math.max(repeat.until,form.weekNum),newId:uid});
       toSave.push(...real.toSave);
       if(!toSave.length) return;
     } else {
@@ -1734,9 +1734,19 @@ function GroupsPanel({state,setState,toast}) {
   const [gq,setGq]=useState("");
   const blank={id:"",name:"",parentId:null,size:30};
 
+  // "Never shares students with" is kept on both groups, so either one shows it.
+  const sepOf=(g,all)=>all.filter(x=>x.id!==g.id&&x.parentId&&x.parentId===g.parentId&&((g.separateFrom||[]).includes(x.id)||(x.separateFrom||[]).includes(g.id))).map(x=>x.id);
   function save(form) {
     if(form.id) {
-      setState(s=>({...s,groups:s.groups.map(g=>g.id===form.id?form:g)}));
+      const sep=form.parentId?(form._sep??sepOf(form,state.groups)):[];
+      const {_sep,...clean}=form;
+      setState(s=>({...s,groups:s.groups.map(g=>{
+        if(g.id===form.id) return {...clean,separateFrom:sep.length?sep:undefined};
+        const has=(g.separateFrom||[]).includes(form.id), want=sep.includes(g.id);
+        if(has===want) return g;
+        const next=want?[...(g.separateFrom||[]),form.id]:(g.separateFrom||[]).filter(x=>x!==form.id);
+        return {...g,separateFrom:next.length?next:undefined};
+      })}),"edited group",form.name);
       toast("Group updated","ok");
     } else {
       setState(s=>({...s,groups:[...s.groups,{...form,id:uid()}]}));
@@ -1785,7 +1795,7 @@ function GroupsPanel({state,setState,toast}) {
             </div>
           )}
           {gq.trim()
-            ? groups.filter(g=>g.name.toLowerCase().includes(gq.trim().toLowerCase())).map(g=><GroupNode key={g.id} g={{...g,parentId:null}} noKids/>)
+            ? groups.filter(g=>g.name.toLowerCase().includes(gq.trim().toLowerCase())).map(g=><GroupNode key={g.id} g={g} noKids/>)
             : tree.map(n=>{
                 if(!n.children.length) return <GroupNode key={n.key} g={n.self} noKids/>;
                 const open=openFolders[n.key]??(editing&&(editing.id===n.self?.id||n.children.some(c=>c.id===editing.id)));
@@ -1809,24 +1819,42 @@ function GroupsPanel({state,setState,toast}) {
       {editing&&(
         <div style={{flex:1,padding:20,overflowY:"auto",minHeight:0,WebkitOverflowScrolling:"touch",overscrollBehavior:"contain"}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
-            <div style={{fontSize:14,fontWeight:600}}>{editing.id?"Edit Group":"New Group"}</div>
+            <div style={{fontSize:14,fontWeight:600}}>{editing.id?"Edit group":"New group"}</div>
             <div style={{display:"flex",gap:6}}>
               {editing.id&&<Btn variant="danger" onClick={()=>remove(editing.id)}>Delete</Btn>}
               <Btn variant="outline" onClick={()=>setEditing(null)}>Cancel</Btn>
               <Btn variant="primary" onClick={()=>save(editing)} disabled={!editing.name}>Save</Btn>
             </div>
           </div>
-          <Field label="Group Name" required>
+          <Field label="Group name" required>
             <input value={editing.name} onChange={e=>setEditing(f=>({...f,name:e.target.value}))}/>
           </Field>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-            <Field label="Parent Group" hint="Leave empty for top-level">
+            <Field label="Parent group" hint="Leave empty for top level">
               <GroupPicker single groups={groups.filter(g=>g.id!==editing.id)} value={editing.parentId?[editing.parentId]:[]} onChange={v=>setEditing(f=>({...f,parentId:v[0]||null}))} noneLabel="— Top level —"/>
             </Field>
-            <Field label="Student Count">
+            <Field label="Student count">
               <input type="number" min={0} value={editing.size||""} onChange={e=>setEditing(f=>({...f,size:+e.target.value}))}/>
             </Field>
           </div>
+          {editing.id&&editing.parentId&&(()=>{
+            const sibs=groups.filter(x=>x.id!==editing.id&&x.parentId===editing.parentId);
+            if(!sibs.length) return null;
+            const cur=editing._sep??sepOf(editing,groups);
+            const parent=groups.find(x=>x.id===editing.parentId);
+            return (
+              <Field label="Never shares students with" hint={`Other groups in ${parent?.name||"this parent"}. Ticked groups can be timetabled at the same time; the rest show a possible-overlap warning.`}>
+                <div style={{display:"flex",flexWrap:"wrap",gap:"6px 14px",marginTop:4}}>
+                  {sibs.map(x=>(
+                    <label key={x.id} style={{display:"flex",alignItems:"center",gap:6,fontSize:14,cursor:"pointer"}}>
+                      <input type="checkbox" checked={cur.includes(x.id)} onChange={e=>setEditing(f=>({...f,_sep:e.target.checked?[...cur,x.id]:cur.filter(y=>y!==x.id)}))}/>
+                      {x.name}
+                    </label>
+                  ))}
+                </div>
+              </Field>
+            );
+          })()}
         </div>
       )}
       {!editing&&<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:"var(--muted2)",fontSize:13}}>Select a group to edit</div>}
@@ -1967,23 +1995,24 @@ function ConflictsTab({conflicts,state,onApptClick,onFix}) {
     </div>
   );
 
-  const grouped={instructor:[],room:[],group:[]};
+  const grouped={instructor:[],room:[],group:[],overlap:[]};
   const open=conflicts.filter(c=>!c.overridden), resolved=conflicts.filter(c=>c.overridden);
   open.forEach(c=>{ if(grouped[c.type]) grouped[c.type].push(c); });
-  const typeLabel={instructor:"Instructor clashes",room:"Room clashes",group:"Group clashes"};
-  const typeColor={instructor:"var(--danger)",room:"var(--warn)",group:"var(--accent2)"};
+  const typeLabel={instructor:"Instructor clashes",room:"Room clashes",group:"Group clashes",overlap:"Possible student overlaps"};
+  const typeColor={instructor:"var(--danger)",room:"var(--warn)",group:"var(--accent2)",overlap:"var(--muted)"};
 
   const renderCard=(c,i)=>{
             const weekLabel=WEEKS.find(w=>w.n===c.a.weekNum)?.label||`Week ${c.a.weekNum}`;
             const dayLabel=DAYS_FULL[c.a.dayIdx];
             const slotLabel=slots.find(x=>x.id===c.a.timeId)?.short||c.a.timeId;
             return (
-              <div key={i} style={{background:"var(--bg2)",border:`1px solid ${c.overridden?"var(--border2)":"var(--danger-line)"}`,opacity:c.overridden?.85:1,
+              <div key={i} style={{background:"var(--bg2)",border:`1px solid ${c.overridden?"var(--border2)":c.type==="overlap"?"var(--warn-line)":"var(--danger-line)"}`,opacity:c.overridden?.85:1,
                 borderRadius:"var(--r2)",padding:"10px 12px",marginBottom:8}}>
                 <div style={{fontSize:11.5,color:"var(--muted)",marginBottom:6,fontFamily:"var(--mono)"}}>
                   {weekLabel} · {dayLabel} · {slotLabel}
-                  {c.overridden&&<span style={{marginLeft:8,color:"var(--accent)",fontWeight:700}}>✓ Overridden · {typeLabel[c.type].replace(" clashes","").toLowerCase()} clash accepted</span>}
+                  {c.overridden&&<span style={{marginLeft:8,color:"var(--accent)",fontWeight:700}}>✓ Overridden · {c.type==="overlap"?"overlap accepted":`${typeLabel[c.type].replace(" clashes","").toLowerCase()} clash accepted`}</span>}
                 </div>
+                {(c.type==="overlap"||c.label.includes(" share students"))&&<div style={{fontSize:13.5,marginBottom:6}}>{c.label.replace(/^[^:]*: /,"")}{c.type==="overlap"?". If they never share students, mark them as separate in Groups.":"."}</div>}
                 <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
                   {[c.a,c.b].map((appt,j)=>{
                     const pal=getPalette(appt.courseId,courses);
@@ -2381,7 +2410,7 @@ function Builder() {
     return () => document.removeEventListener("keydown", onKey);
   }, [stepHistory]);
 
-  const conflicts = useMemo(() => getAllConflicts(state.appointments || {}, state.slots), [state.appointments, state.slots]);
+  const conflicts = useMemo(() => getAllConflicts(state.appointments || {}, state.slots, state.groups), [state.appointments, state.slots, state.groups]);
   const openConflicts = useMemo(() => conflicts.filter(c => !c.overridden), [conflicts]);
   const planShort = useMemo(() => buildPlan(state).rows.filter(r => r.missing > 0).length, [state]);
 

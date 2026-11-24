@@ -162,7 +162,7 @@ function TermDetails({ term, nameOf, reload, toast }) {
       const r = await superApi.room(term.rid);
       const st = r?.tree ? treeToState(r.tree) : r?.legacy || {};
       const appts = st.appointments || {};
-      setStats({ sessions: Object.keys(appts).length, courses: (st.courses || []).length, conflicts: getAllConflicts(appts, st.slots || []).filter(c => !c.overridden).length });
+      setStats({ sessions: Object.keys(appts).length, courses: (st.courses || []).length, conflicts: getAllConflicts(appts, st.slots || [], st.groups || []).filter(c => !c.overridden).length });
     } catch { toast("Couldn't read that term", "warn"); }
     setBusy("");
   }

@@ -39,3 +39,31 @@ describe("overridden clashes", () => {
     expect(all.filter(c => c.type !== "instructor").every(c => !c.overridden)).toBe(true);
   });
 });
+
+describe("parent and sub-groups", () => {
+  const groups = [
+    { id: "c6", name: "Cohort 6" },
+    { id: "th", name: "Cohort 6 TH", parentId: "c6", separateFrom: ["fe"] },
+    { id: "fe", name: "Cohort 6 FE", parentId: "c6" },
+    { id: "cs", name: "Cohort 6 CS", parentId: "c6" },
+  ];
+  const S = (id, g, o = {}) => ({ id, weekNum: 1, dayIdx: 0, timeId: "am", courseId: id, courseName: id, groupIds: g, instructorId: id, roomId: id, ...o });
+  const slots = [{ id: "am", label: "09:00-12:00" }];
+  it("a whole-cohort class clashes with a class for one of its sub-groups", () => {
+    const all = getAllConflicts({ a: S("a", ["c6"]), b: S("b", ["th"]) }, slots, groups);
+    expect(all).toHaveLength(1);
+    expect(all[0]).toMatchObject({ type: "group" });
+    expect(all[0].label).toContain("Cohort 6 TH");
+    expect(checkConflicts({ b: S("b", ["th"]) }, S("a", ["c6"]), slots, null, groups)[0].type).toBe("group");
+  });
+  it("separate sub-groups don't clash; other sub-groups warn and can be overridden", () => {
+    expect(getAllConflicts({ a: S("a", ["th"]), b: S("b", ["fe"]) }, slots, groups)).toEqual([]);
+    const w = getAllConflicts({ a: S("a", ["th"]), b: S("b", ["cs"]) }, slots, groups);
+    expect(w.map(c => [c.type, c.overridden])).toEqual([["overlap", false]]);
+    const ok = getAllConflicts({ a: S("a", ["th"], { overrides: ["overlap"] }), b: S("b", ["cs"]) }, slots, groups);
+    expect(ok[0].overridden).toBe(true);
+  });
+  it("without the group list, only identical groups are compared (as before)", () => {
+    expect(getAllConflicts({ a: S("a", ["c6"]), b: S("b", ["th"]) }, slots)).toEqual([]);
+  });
+});

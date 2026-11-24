@@ -19,7 +19,7 @@ export function planRepeat(state, base, { every, until, newId }) {
   // sessions we are adding must not clash with each other either (they are in different weeks, so they can't)
   weeks.forEach(w => {
     if (holidays.size && w1 && w > 0 && holidays.has(iso(slotDate(parseISO(w1), w, base.dayIdx)))) { holiday.push(w); return; }
-    if (checkConflicts(state.appointments, { ...base, weekNum: w }, state.slots).filter(c => !(base.overrides || []).includes(c.type)).length) { clash.push(w); return; }
+    if (checkConflicts(state.appointments, { ...base, weekNum: w }, state.slots, null, state.groups).filter(c => !(base.overrides || []).includes(c.type)).length) { clash.push(w); return; }
     toSave.push({ ...base, id: newId(), weekNum: w, num: undefined });
   });
   return { toSave, clash, holiday, weeks };

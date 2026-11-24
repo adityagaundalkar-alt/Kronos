@@ -3,7 +3,7 @@ import { getAllConflicts } from "./conflicts.js";
 import { parseISO, iso, slotDate } from "./dates.js";
 
 const key = c => `${c.type}|${[c.a.id, c.b.id].sort().join("|")}`;
-export const openClashes = (appointments, slots) => getAllConflicts(appointments, slots).filter(c => !c.overridden);
+export const openClashes = (appointments, slots, groups) => getAllConflicts(appointments, slots, groups).filter(c => !c.overridden);
 
 /**
  * moves: [{ id, weekNum?, dayIdx?, timeId? }]  (only the fields that change).
@@ -29,8 +29,8 @@ export function planMoves(state, moves, { maxDay = 4 } = {}) {
     if (t.timeId !== a.timeId) { delete next.start; delete next.end; } // a custom time belongs to its slot
     apps[m.id] = next; moved.push(m.id);
   });
-  const before = new Set(openClashes(state.appointments, state.slots).map(key));
-  const newClashes = openClashes(apps, state.slots).filter(c => !before.has(key(c))).length;
+  const before = new Set(openClashes(state.appointments, state.slots, state.groups).map(key));
+  const newClashes = openClashes(apps, state.slots, state.groups).filter(c => !before.has(key(c))).length;
   return { appointments: apps, moved, blocked, newClashes };
 }
 
