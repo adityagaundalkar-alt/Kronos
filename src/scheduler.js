@@ -15,6 +15,7 @@
 // instructor availability. Soft preferences (preferred / avoided days and slots, spreading load across
 // days, keeping to a consistent slot and room) only influence which valid option wins.
 // Sessions with `locked: true` are never removed or moved.
+import { groupRelations, groupClash } from "./groups.js";
 import { iso, slotDate, parseISO } from "./dates.js";
 import { sessionsOverlap } from "./timeslots.js";
 
@@ -108,6 +109,7 @@ function makeContext(state, job, index) {
     slots: state.slots || [],
     rooms: state.rooms || [],
     groups: state.groups || [],
+    rel: groupRelations(state.groups || []),
     instructor: (state.instructors || []).find(i => i.id === job.instructorId) || null,
     needed: seatsNeeded(job, state.groups),
     holidayOn(week, dayIdx) {
@@ -137,11 +139,10 @@ function evaluate(ctx, week, dayIdx, timeId) {
 
   const wanted = (job.groupIds || []).filter(Boolean);
   if (wanted.length) {
-    const c = here.find(a => !siblingSection(job, a) && (a.groupIds || []).some(g => wanted.includes(g)));
-    if (c) {
-      const gid = (c.groupIds || []).find(g => wanted.includes(g));
-      reasons.push({ code: "group-busy", detail: `${groups.find(g => g.id === gid)?.name || "A student group"} has ${c.courseCode || c.courseName || "a session"}` });
-    }
+    // the same students: the same group, or a parent and its sub-group (Cohort 6 vs Cohort 6 TH)
+    let hit = null;
+    const c = here.find(a => !siblingSection(job, a) && (hit = groupClash(ctx.rel, a.groupIds || [], wanted))?.kind === "group");
+    if (c) reasons.push({ code: "group-busy", detail: `${groups.find(g => g.id === hit.a)?.name || "A student group"} has ${c.courseCode || c.courseName || "a session"}` });
   }
 
   let freeRooms = [];
@@ -176,7 +177,12 @@ function softScore(ctx, week, dayIdx, timeId, anchor) {
   const day = index.day(week, dayIdx);
   if (job.instructorId) s -= 0.5 * day.filter(a => a.instructorId === job.instructorId).length; // spread the instructor's load
   const wanted = job.groupIds || [];
-  if (wanted.length) s -= 0.4 * day.filter(a => !siblingSection(job, a) && (a.groupIds || []).some(g => wanted.includes(g))).length; // lighter days for students
+  if (wanted.length) {
+    s -= 0.4 * day.filter(a => !siblingSection(job, a) && groupClash(ctx.rel, a.groupIds || [], wanted)).length; // lighter days for students
+    // sub-groups that may share students: allowed, but only when nothing better is free
+    const probe = { weekNum: week, dayIdx, timeId };
+    if (day.some(a => !siblingSection(job, a) && sessionsOverlap(a, probe, ctx.slots) && groupClash(ctx.rel, a.groupIds || [], wanted)?.kind === "overlap")) s -= 6;
+  }
   if (job.sectionId && day.some(a => siblingSection(job, a) && a.timeId === timeId)) s += 2.5; // run alongside the other sections
   if (anchor && anchor.dayIdx === dayIdx && anchor.timeId === timeId) s += 1.5;
   return s;
@@ -474,7 +480,7 @@ export function slotOptions(state, job) {
     let free = 0, roomsAll = null;
     for (const w of weeks) {
       const ev = evaluate(ctx, w, c.dayIdx, c.timeId);
-      const load = wanted.length ? index.day(w, c.dayIdx).filter(a => !siblingSection(job, a) && (a.groupIds || []).some(g => wanted.includes(g))).length : 0;
+      const load = wanted.length ? index.day(w, c.dayIdx).filter(a => !siblingSection(job, a) && groupClash(ctx.rel, a.groupIds || [], wanted)).length : 0;
       const rooms = ev.ok ? ev.freeRooms.map(r => r.name) : [];
       byWeek[w] = { ok: ev.ok, rooms, roomIds: ev.ok ? ev.freeRooms.map(r => r.id) : [], load };
       if (ev.ok) { free++; roomsAll = roomsAll ? roomsAll.filter(n => rooms.includes(n)) : rooms; }

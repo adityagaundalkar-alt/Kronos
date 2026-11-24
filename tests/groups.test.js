@@ -27,3 +27,38 @@ describe("group tree", () => {
     expect(toggleMany(["a", "b", "z"], ["a", "b"])).toEqual(["z"]);
   });
 });
+
+import { groupRelations, groupClash } from "../src/groups.js";
+describe("who shares students", () => {
+  const G = [
+    { id: "c6", name: "Cohort 6" },
+    { id: "th", name: "Cohort 6 TH", parentId: "c6", separateFrom: ["fe"] },
+    { id: "fe", name: "Cohort 6 FE", parentId: "c6" },
+    { id: "cs", name: "Cohort 6 CS", parentId: "c6" },
+    { id: "biz", name: "Cohort 6 Biz", parentId: "c6", separateFrom: ["cs"] },
+    { id: "csA", name: "Cohort 6 CS A", parentId: "cs" },
+    { id: "c7", name: "Cohort 7" }, { id: "th7", name: "Cohort 7 TH", parentId: "c7" },
+    { id: "loopA", parentId: "loopB" }, { id: "loopB", parentId: "loopA" },
+  ];
+  const rel = groupRelations(G);
+  it("a parent contains its sub-groups at any depth", () => {
+    expect(rel("c6", "th")).toBe("contains");
+    expect(rel("csA", "c6")).toBe("contains");
+  });
+  it("sub-groups marked separate never share, and their own sub-groups inherit it", () => {
+    expect(rel("th", "fe")).toBe("separate");
+    expect(rel("fe", "th")).toBe("separate");
+    expect(rel("csA", "biz")).toBe("separate");
+  });
+  it("other sub-groups of one parent may share; other families don't", () => {
+    expect(rel("th", "cs")).toBe("maybe");
+    expect(rel("th", "th7")).toBe("none");
+    expect(rel("c6", "c7")).toBe("none");
+    expect(rel("loopA", "c6")).toBe("none"); // a parent loop doesn't hang
+  });
+  it("groupClash takes the strongest relation", () => {
+    expect(groupClash(rel, ["th"], ["c6"])).toMatchObject({ kind: "group", relation: "contains" });
+    expect(groupClash(rel, ["th", "c7"], ["cs"])).toMatchObject({ kind: "overlap" });
+    expect(groupClash(rel, ["th"], ["fe", "th7"])).toBe(null);
+  });
+});

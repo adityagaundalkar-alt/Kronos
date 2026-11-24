@@ -35,7 +35,7 @@ export function suggestFixes(state, appt, { limit = 6 } = {}) {
       if (holidayOn(state, appt.weekNum, d)) continue;
       if (!instructorFree(state, appt, d, s.id)) continue;
       const cand = { ...stripCustom(appt), dayIdx: d, timeId: s.id };
-      if (checkConflicts(apps, cand, slots, appt.id).length) continue;
+      if (checkConflicts(apps, cand, slots, appt.id, state.groups).length) continue;
       out.push({ kind: "move", label: `${dayNames[d]} ${s.short || s.label}`, changes: { dayIdx: d, timeId: s.id, start: undefined, end: undefined },
         score: Math.abs(d - appt.dayIdx) * 3 + (s.id === appt.timeId ? 0 : 1) });
     }
@@ -49,7 +49,7 @@ export function suggestFixes(state, appt, { limit = 6 } = {}) {
   (state.rooms || []).forEach(r => {
     if (r.id === appt.roomId) return;
     if (need && (Number(r.capacity) || 0) < need) return;
-    if (checkConflicts(apps, { ...appt, roomId: r.id }, slots, appt.id).length) return;
+    if (checkConflicts(apps, { ...appt, roomId: r.id }, slots, appt.id, state.groups).length) return;
     rooms.push({ kind: "room", label: `${r.name} (${r.capacity} seats)`, changes: { roomId: r.id }, score: (Number(r.capacity) || 0) });
   });
   rooms.sort((a, b) => a.score - b.score);

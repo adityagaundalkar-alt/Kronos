@@ -536,3 +536,15 @@ describe("choosing times", () => {
     expect(res.reports[0].pickMisses[0].reasons[0].code).toBe("instructor-busy");
   });
 });
+
+describe("parent groups", () => {
+  it("won't place a whole-cohort class over a sub-group's class, and avoids possible overlaps", () => {
+    const groups = [{ id: "c6", name: "Cohort 6", size: 0 }, { id: "th", name: "6 TH", parentId: "c6", size: 0 }, { id: "cs", name: "6 CS", parentId: "c6", size: 0 }];
+    const s = base({ groups, appointments: { x: appt("x", 1, 0, "am", { groupIds: ["th"], instructorId: "i2", roomId: "r1" }) } });
+    const res = runAutoSchedule(s, [job({ weeks: [1], groupIds: ["c6"], preferDays: [0], preferSlots: ["am"] })], { makeId: counter });
+    expect(res.scheduled).toHaveLength(1);
+    expect(res.scheduled[0]).not.toMatchObject({ dayIdx: 0, timeId: "am" });
+    const res2 = runAutoSchedule(s, [job({ weeks: [1], groupIds: ["cs"], preferDays: [0], preferSlots: ["am"] })], { makeId: counter });
+    expect(res2.scheduled[0]).not.toMatchObject({ dayIdx: 0, timeId: "am" }); // possible overlap with 6 TH: only if nothing else is free
+  });
+});
